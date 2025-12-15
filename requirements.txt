@@ -1,0 +1,13 @@
+# Core dependencies
+gradio==5.49.1
+pandas>=2.0.0
+
+# Testing dependencies
+pytest>=7.4.0
+hypothesis>=6.82.0
+
+# Markdown and LaTeX rendering
+markdown>=3.4.0
+
+# Utilities
+python-dateutil>=2.8.0
