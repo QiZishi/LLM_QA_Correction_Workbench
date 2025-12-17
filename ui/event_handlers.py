@@ -66,16 +66,22 @@ def navigate_next(current_index: int, total_samples: int) -> int:
 
 def update_progress_display(corrected_count: int, total_loaded: int) -> str:
     """
-    Generate progress display markdown.
+    Generate progress display HTML.
     
     Args:
         corrected_count: Number of corrected samples
         total_loaded: Total number of loaded samples
     
     Returns:
-        Markdown string for progress display
+        HTML string for progress display
     """
-    return f"**进度**: {corrected_count} / {total_loaded}"
+    percentage = (corrected_count / total_loaded * 100) if total_loaded > 0 else 0
+    return f'''
+    <div class="progress-bar" style="background: linear-gradient(90deg, #4CAF50 {percentage}%, #e0e0e0 {percentage}%); 
+         padding: 12px 15px; border-radius: 8px; font-size: 18px; font-weight: bold; text-align: center;">
+        进度: {corrected_count} / {total_loaded} (已校正: {corrected_count}) - {percentage:.1f}%
+    </div>
+    '''
 
 
 def generate_sample_list_html(samples: list, current_index: int) -> str:
@@ -90,33 +96,66 @@ def generate_sample_list_html(samples: list, current_index: int) -> str:
         HTML string for sample list
     """
     if not samples:
-        return "<div>暂无数据</div>"
+        return '<div class="sample-list-container" style="font-size: 16px; padding: 15px;">暂无数据</div>'
     
-    html_parts = ["<div style='max-height: 400px; overflow-y: auto;'>"]
+    html_parts = ['''
+    <div class="sample-list-container" style="max-height: 600px; height: 600px; overflow-y: auto; 
+         border: 1px solid #1976d2; border-radius: 8px; padding: 10px; font-size: 16px;">
+    ''']
+    
+    # 统计信息
+    corrected = sum(1 for s in samples if s.status == "corrected")
+    discarded = sum(1 for s in samples if s.status == "discarded")
+    pending = len(samples) - corrected - discarded
+    
+    html_parts.append(f'''
+    <div style="padding: 8px; margin-bottom: 10px; background: #f5f5f5; border-radius: 5px; font-size: 14px;">
+        📊 统计: 待处理 <span style="color: #9E9E9E;">{pending}</span> | 
+        已校正 <span style="color: #4CAF50;">{corrected}</span> | 
+        已丢弃 <span style="color: #F44336;">{discarded}</span>
+    </div>
+    ''')
     
     for i, sample in enumerate(samples):
         # Status marker
         if sample.status == "corrected":
             marker = "✅"
             color = "#4CAF50"
+            status_text = "已校正"
         elif sample.status == "discarded":
             marker = "❌"
             color = "#F44336"
+            status_text = "已丢弃"
         else:
             marker = "⭕"
             color = "#9E9E9E"
+            status_text = "待处理"
         
         # Highlight current sample
-        bg_color = "#E3F2FD" if i == current_index else "transparent"
+        bg_color = "#E3F2FD" if i == current_index else "#ffffff"
+        border_width = "4px" if i == current_index else "3px"
+        font_weight = "bold" if i == current_index else "normal"
         
-        html_parts.append(f"""
-        <div style='padding: 8px; margin: 4px 0; background: {bg_color}; 
-                    border-left: 3px solid {color}; cursor: pointer;'
-             onclick='alert("Sample {i} clicked")'>
-            <span style='color: {color};'>{marker}</span>
-            <strong>#{sample.id}</strong>: {sample.instruction[:30]}...
+        # Truncate instruction for display
+        instruction_preview = sample.instruction[:40] + "..." if len(sample.instruction) > 40 else sample.instruction
+        # Escape HTML
+        import html
+        instruction_preview = html.escape(instruction_preview)
+        
+        html_parts.append(f'''
+        <div style="padding: 10px; margin: 5px 0; background: {bg_color}; 
+                    border-left: {border_width} solid {color}; border-radius: 0 5px 5px 0;
+                    font-weight: {font_weight};">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: {color}; font-size: 18px;">{marker}</span>
+                <span style="font-size: 14px; color: #666;">样本编号{sample.id}</span>
+                <span style="font-size: 12px; color: {color};">{status_text}</span>
+            </div>
+            <div style="margin-top: 5px; font-size: 14px; color: #333; line-height: 1.4;">
+                {instruction_preview}
+            </div>
         </div>
-        """)
+        ''')
     
     html_parts.append("</div>")
     return "".join(html_parts)
@@ -271,19 +310,23 @@ def load_sample_to_ui(app_state: Dict[str, Any]) -> Tuple[str, str, str, str, st
         app_state: Current application state
     
     Returns:
-        Tuple of (instruction, output, reference_html, progress_md, sample_list_html)
+        Tuple of (instruction, output, reference_html, progress_html, sample_list_html)
     """
     from services import RenderEngine
     
+    empty_reference = '<div class="reference-content" style="min-height: 500px; font-size: 18px; padding: 15px;">暂无数据</div>'
+    empty_progress = '<div class="progress-bar" style="padding: 12px 15px; border-radius: 8px; font-size: 18px; text-align: center;">进度: 0 / 0</div>'
+    empty_list = '<div class="sample-list-container" style="font-size: 16px; padding: 15px;">暂无数据</div>'
+    
     if not app_state.get('samples') or not app_state.get('data_manager'):
-        return "", "", "<div>暂无数据</div>", "**进度**: 0 / 0", "<div>暂无数据</div>"
+        return "", "", empty_reference, empty_progress, empty_list
     
     current_index = app_state['current_index']
     samples = app_state['samples']
     data_manager = app_state['data_manager']
     
     if current_index >= len(samples):
-        return "", "", "<div>索引超出范围</div>", "**进度**: 0 / 0", "<div>暂无数据</div>"
+        return "", "", empty_reference, empty_progress, empty_list
     
     current_sample = samples[current_index]
     
@@ -293,7 +336,7 @@ def load_sample_to_ui(app_state: Dict[str, Any]) -> Tuple[str, str, str, str, st
     
     # Get progress
     corrected_count, total_loaded = data_manager.get_progress()
-    progress_md = f"**进度**: {corrected_count} / {total_loaded}"
+    progress_html = update_progress_display(corrected_count, total_loaded)
     
     # Generate sample list
     sample_list_html = generate_sample_list_html(samples, current_index)
@@ -302,12 +345,12 @@ def load_sample_to_ui(app_state: Dict[str, Any]) -> Tuple[str, str, str, str, st
         current_sample.instruction,
         current_sample.output,
         reference_html,
-        progress_md,
+        progress_html,
         sample_list_html
     )
 
 
-def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, bool, bool]:
+def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str, str, bool, bool]:
     """
     Generate diff preview and transition to Phase 2.
     
@@ -317,13 +360,13 @@ def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, 
         app_state: Current application state
     
     Returns:
-        Tuple of (updated_app_state, original_display, diff_html, phase1_visible, phase2_visible)
+        Tuple of (updated_app_state, instruction_diff_html, instruction_text, output_diff_html, output_text, phase1_visible, phase2_visible)
     """
     from services import DiffEngine, RenderEngine
     
     if not app_state.get('samples'):
         gr.Warning("无数据可处理")
-        return app_state, "", "<div>无数据</div>", True, False
+        return app_state, "<div>无数据</div>", "", "<div>无数据</div>", "", True, False
     
     try:
         current_index = app_state['current_index']
@@ -333,48 +376,52 @@ def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, 
         is_valid, error_msg = validate_content_not_empty(instruction, "问题")
         if not is_valid:
             gr.Warning(error_msg)
-            return app_state, "", f"<div>{error_msg}</div>", True, False
+            return app_state, f"<div>{error_msg}</div>", "", f"<div>{error_msg}</div>", "", True, False
         
         is_valid, error_msg = validate_content_not_empty(output, "回答")
         if not is_valid:
             gr.Warning(error_msg)
-            return app_state, "", f"<div>{error_msg}</div>", True, False
+            return app_state, f"<div>{error_msg}</div>", "", f"<div>{error_msg}</div>", "", True, False
         
         # Store edited content
         current_sample.edited_instruction = instruction
         current_sample.edited_output = output
         
-        # Compute diff with timeout protection
+        # Compute diff for both instruction and output
         diff_engine = DiffEngine()
+        render_engine = RenderEngine()
+        
         try:
-            diff_result = diff_engine.compute_diff(current_sample.output, output)
+            # Compute diff for instruction (if changed)
+            if current_sample.instruction != instruction:
+                instruction_diff_result = diff_engine.compute_diff(current_sample.instruction, instruction)
+                instruction_diff_html = render_engine.render_diff_tags(instruction_diff_result)
+            else:
+                # No change, just render the instruction
+                instruction_diff_html = f'<div class="katex-render-target" data-katex-render="true">{instruction}</div>'
+            
+            # Compute diff for output
+            output_diff_result = diff_engine.compute_diff(current_sample.output, output)
+            output_diff_html = render_engine.render_diff_tags(output_diff_result)
+            
+            # Store diff results
+            current_sample.diff_result = output_diff_result
+            
         except TimeoutError:
             gr.Error("差异计算超时，文本可能过长")
-            return app_state, "", "<div>差异计算超时</div>", True, False
+            return app_state, "<div>差异计算超时</div>", instruction, "<div>差异计算超时</div>", output, True, False
         except Exception as e:
             gr.Error(f"差异计算失败: {str(e)}")
-            return app_state, "", f"<div>差异计算失败: {str(e)}</div>", True, False
-        
-        # Store diff result
-        current_sample.diff_result = diff_result
-        
-        # Render diff
-        render_engine = RenderEngine()
-        try:
-            diff_html = render_engine.render_diff_tags(diff_result)
-            original_display = render_engine.render_markdown_latex(current_sample.output)
-        except Exception as e:
-            gr.Error(f"渲染失败: {str(e)}")
-            return app_state, "", f"<div>渲染失败: {str(e)}</div>", True, False
+            return app_state, f"<div>差异计算失败: {str(e)}</div>", instruction, f"<div>差异计算失败: {str(e)}</div>", output, True, False
         
         # Update phase
         app_state['phase'] = 2
         
-        return app_state, original_display, diff_html, False, True
+        return app_state, instruction_diff_html, instruction, output_diff_html, output, False, True
         
     except Exception as e:
         gr.Error(f"生成预览失败: {str(e)}")
-        return app_state, "", f"<div>生成预览失败: {str(e)}</div>", True, False
+        return app_state, f"<div>生成预览失败: {str(e)}</div>", "", f"<div>生成预览失败: {str(e)}</div>", "", True, False
 
 
 def handle_submit(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str, str, str, bool, bool]:
@@ -418,18 +465,21 @@ def handle_submit(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, 
             data_manager.update_sample_status(current_sample.id, 'unprocessed')
             return app_state, "", "", "<div>添加到导出队列失败</div>", "**进度**: 0 / 0", "<div>无数据</div>", True, False
         
-        # Check if should load next batch
-        try:
-            if data_manager.should_load_next_batch():
-                new_samples = data_manager.load_next_batch()
-                app_state['samples'].extend(new_samples)
-        except Exception as e:
-            gr.Warning(f"加载下一批数据失败: {str(e)}")
-            # Continue anyway
-        
         # Navigate to next sample
         if current_index < len(app_state['samples']) - 1:
             app_state['current_index'] += 1
+        
+        # Check if should load next batch - 当前索引与已加载总数相差10条以内时加载
+        try:
+            new_index = app_state['current_index']
+            if data_manager.should_load_next_batch(new_index):
+                new_samples = data_manager.load_next_batch()
+                if new_samples:
+                    app_state['samples'].extend(new_samples)
+                    gr.Info(f"已自动加载 {len(new_samples)} 条数据")
+        except Exception as e:
+            gr.Warning(f"加载下一批数据失败: {str(e)}")
+            # Continue anyway
         
         # Reset to Phase 1
         app_state['phase'] = 1
@@ -471,18 +521,21 @@ def handle_discard(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str,
             gr.Error(f"更新状态失败: {str(e)}")
             return app_state, "", "", "<div>更新状态失败</div>", "**进度**: 0 / 0", "<div>无数据</div>", True, False
         
-        # Check if should load next batch
-        try:
-            if data_manager.should_load_next_batch():
-                new_samples = data_manager.load_next_batch()
-                app_state['samples'].extend(new_samples)
-        except Exception as e:
-            gr.Warning(f"加载下一批数据失败: {str(e)}")
-            # Continue anyway
-        
         # Navigate to next sample
         if current_index < len(app_state['samples']) - 1:
             app_state['current_index'] += 1
+        
+        # Check if should load next batch - 当前索引与已加载总数相差10条以内时加载
+        try:
+            new_index = app_state['current_index']
+            if data_manager.should_load_next_batch(new_index):
+                new_samples = data_manager.load_next_batch()
+                if new_samples:
+                    app_state['samples'].extend(new_samples)
+                    gr.Info(f"已自动加载 {len(new_samples)} 条数据")
+        except Exception as e:
+            gr.Warning(f"加载下一批数据失败: {str(e)}")
+            # Continue anyway
         
         # Reset to Phase 1
         app_state['phase'] = 1
@@ -622,15 +675,16 @@ def handle_navigation(direction: str, app_state: Dict[str, Any]) -> Tuple[Dict[s
             else:
                 gr.Info("已经是最后一条数据")
         
-        # Check if should load next batch
+        # Check if should load next batch - 当前索引与已加载总数相差10条以内时加载
         if direction == "next" and app_state.get('data_manager'):
             try:
                 data_manager = app_state['data_manager']
-                if data_manager.should_load_next_batch():
+                new_index = app_state['current_index']
+                if data_manager.should_load_next_batch(new_index):
                     new_samples = data_manager.load_next_batch()
-                    app_state['samples'].extend(new_samples)
                     if new_samples:
-                        gr.Info(f"已自动加载下一批 {len(new_samples)} 条数据")
+                        app_state['samples'].extend(new_samples)
+                        gr.Info(f"已自动加载 {len(new_samples)} 条数据")
             except Exception as e:
                 gr.Warning(f"加载下一批数据失败: {str(e)}")
                 # Continue anyway

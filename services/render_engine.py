@@ -2,10 +2,13 @@
 RenderEngine for Markdown and LaTeX rendering.
 
 Handles conversion of Markdown and LaTeX to HTML, and styling of diff tags.
+Supports multiple LaTeX formats for better compatibility.
 """
 
 import re
+import html
 import markdown
+import uuid
 
 
 class RenderEngine:
@@ -19,88 +22,196 @@ class RenderEngine:
     - Inject WYSIWYG editing controls
     """
     
+    # LaTeX 分隔符模式 - 支持多种格式
+    LATEX_PATTERNS = [
+        # Display math: $$...$$
+        (r'\$\$(.+?)\$\$', 'display'),
+        # Display math: \[...\]
+        (r'\\\[(.+?)\\\]', 'display'),
+        # Inline math: $...$  (非贪婪，避免跨行匹配)
+        (r'\$([^\$\n]+?)\$', 'inline'),
+        # Inline math: \(...\)
+        (r'\\\((.+?)\\\)', 'inline'),
+        # Display math: \begin{equation}...\end{equation}
+        (r'\\begin\{equation\}(.+?)\\end\{equation\}', 'display'),
+        # Display math: \begin{align}...\end{align}
+        (r'\\begin\{align\*?\}(.+?)\\end\{align\*?\}', 'display'),
+        # Display math: \begin{gather}...\end{gather}
+        (r'\\begin\{gather\*?\}(.+?)\\end\{gather\*?\}', 'display'),
+    ]
+    
     def __init__(self):
         """Initialize RenderEngine with Markdown processor."""
-        self.md = markdown.Markdown(extensions=['extra', 'nl2br'])
+        self.md = markdown.Markdown(extensions=['extra', 'nl2br', 'sane_lists'])
+    
+    def _escape_html_in_latex(self, latex_content: str) -> str:
+        """
+        转义 LaTeX 内容中的 HTML 特殊字符，但保留 LaTeX 命令
+        """
+        # 只转义 < 和 > 以防止 HTML 注入，但保留其他字符
+        result = latex_content.replace('&', '&amp;')
+        result = result.replace('<', '&lt;')
+        result = result.replace('>', '&gt;')
+        return result
+    
+    def _protect_latex(self, text: str) -> tuple:
+        """
+        保护 LaTeX 公式不被 Markdown 处理
+        
+        Returns:
+            (处理后的文本, LaTeX占位符列表)
+        """
+        if not text:
+            return text, []
+        
+        latex_placeholders = []
+        placeholder_index = [0]  # 使用列表以便在闭包中修改
+        
+        def replace_latex(match, display_type):
+            """替换 LaTeX 为占位符"""
+            formula = match.group(1).strip()
+            # 使用HTML注释格式的占位符,避免被Markdown解析
+            unique_id = str(uuid.uuid4()).replace('-', '')
+            placeholder = f"<!--LATEX_{unique_id}-->"
+            latex_placeholders.append({
+                'placeholder': placeholder,
+                'formula': formula,
+                'display': display_type,
+                'original': match.group(0)
+            })
+            placeholder_index[0] += 1
+            return placeholder
+        
+        result = text
+        
+        # 按顺序处理各种 LaTeX 模式（先处理 display，再处理 inline）
+        for pattern, display_type in self.LATEX_PATTERNS:
+            try:
+                result = re.sub(
+                    pattern,
+                    lambda m, dt=display_type: replace_latex(m, dt),
+                    result,
+                    flags=re.DOTALL
+                )
+            except re.error:
+                # 如果正则表达式出错，跳过该模式
+                continue
+        
+        return result, latex_placeholders
+
+    def _restore_latex(self, html_text: str, latex_placeholders: list) -> str:
+        """
+        恢复 LaTeX 公式，直接输出$...$格式供KaTeX渲染
+        不需要额外的span包装，KaTeX会自动处理
+        """
+        result = html_text
+        
+        for item in latex_placeholders:
+            placeholder = item['placeholder']
+            formula = item['formula']
+            display_type = item['display']
+            original = item['original']
+            
+            # 直接恢复原始LaTeX格式，让KaTeX的auto-render处理
+            # 不进行HTML转义，因为这些内容会被KaTeX JavaScript处理
+            if display_type == 'display':
+                latex_html = f'$${formula}$$'
+            else:
+                latex_html = f'${formula}$'
+            
+            result = result.replace(placeholder, latex_html)
+        
+        return result
     
     def render_markdown_latex(self, text: str) -> str:
         """
         Render Markdown and LaTeX to HTML.
         
         Converts Markdown syntax to HTML and preserves LaTeX formulas
-        for rendering with KaTeX/MathJax.
+        for rendering with KaTeX.
         
         Args:
             text: Text containing Markdown and/or LaTeX
         
         Returns:
-            HTML string with rendered Markdown and LaTeX placeholders
+            HTML string with rendered Markdown and LaTeX
         """
         if not text:
             return ""
         
-        # Protect LaTeX formulas from Markdown processing
-        latex_formulas = []
-        
-        def protect_latex(match):
-            """Replace LaTeX with placeholder."""
-            latex_formulas.append(match.group(0))
-            return f"___LATEX_{len(latex_formulas)-1}___"
-        
-        # Find and protect inline LaTeX: $...$
-        text = re.sub(r'\$([^\$]+)\$', protect_latex, text)
-        
-        # Find and protect display LaTeX: $$...$$
-        text = re.sub(r'\$\$([^\$]+)\$\$', protect_latex, text)
-        
-        # Render Markdown
-        html = self.md.convert(text)
-        
-        # Restore LaTeX formulas
-        for i, formula in enumerate(latex_formulas):
-            placeholder = f"___LATEX_{i}___"
-            # Wrap in span for KaTeX/MathJax rendering
-            html = html.replace(placeholder, f'<span class="latex-formula">{formula}</span>')
-        
-        # Reset Markdown processor for next use
-        self.md.reset()
-        
-        return html
+        try:
+            # 1. 保护 LaTeX 公式
+            protected_text, latex_placeholders = self._protect_latex(text)
+            
+            # 2. 渲染 Markdown
+            html_content = self.md.convert(protected_text)
+            
+            # 3. 恢复 LaTeX 公式
+            if latex_placeholders:
+                html_content = self._restore_latex(html_content, latex_placeholders)
+            
+            # 4. 重置 Markdown 处理器
+            self.md.reset()
+            
+            # 5. 包装在带样式的容器中，使用data属性标记需要渲染
+            return f'''
+            <div class="reference-content katex-render-target" data-katex-render="true" style="font-size: 18px; line-height: 1.8; padding: 15px;">
+                {html_content}
+            </div>
+            '''
+        except Exception as e:
+            # 如果渲染失败，返回原始文本（HTML转义）
+            escaped_text = html.escape(text)
+            return f'''
+            <div class="reference-content" style="font-size: 18px; line-height: 1.8; padding: 15px;">
+                <pre style="white-space: pre-wrap; word-wrap: break-word;">{escaped_text}</pre>
+            </div>
+            '''
     
     def render_diff_tags(self, text: str) -> str:
         """
-        Convert <false>/<true> tags to styled HTML.
+        Convert <false>/<true> tags to styled HTML, preserving LaTeX.
         
         Applies visual styling:
         - <false> → red text with strikethrough
         - <true> → green text
         
+        Also handles LaTeX formulas within diff tags.
+        
         Args:
-            text: Text with <false> and <true> tags
+            text: Text with <false> and <true> tags (may contain LaTeX)
         
         Returns:
-            HTML with styled spans
+            HTML with styled spans and rendered LaTeX
         """
         if not text:
             return ""
         
-        # Replace <false> tags with styled spans
-        text = re.sub(
+        # 1. 先保护LaTeX公式
+        protected_text, latex_placeholders = self._protect_latex(text)
+        
+        # 2. Replace <false> tags with styled spans
+        protected_text = re.sub(
             r'<false>(.*?)</false>',
-            r'<span style="color: red; text-decoration: line-through;">\1</span>',
-            text,
+            r'<span style="color: #d32f2f; text-decoration: line-through; background: #ffebee; padding: 2px 4px; border-radius: 3px;">\1</span>',
+            protected_text,
             flags=re.DOTALL
         )
         
-        # Replace <true> tags with styled spans
-        text = re.sub(
+        # 3. Replace <true> tags with styled spans
+        protected_text = re.sub(
             r'<true>(.*?)</true>',
-            r'<span style="color: green;">\1</span>',
-            text,
+            r'<span style="color: #388e3c; background: #e8f5e9; padding: 2px 4px; border-radius: 3px;">\1</span>',
+            protected_text,
             flags=re.DOTALL
         )
         
-        return text
+        # 4. 恢复LaTeX公式
+        if latex_placeholders:
+            protected_text = self._restore_latex(protected_text, latex_placeholders)
+        
+        # 5. 标记为需要渲染的内容
+        return f'<div class="katex-render-target" data-katex-render="true">{protected_text}</div>'
     
     def render_markdown_latex_with_diff(self, text: str) -> str:
         """
@@ -117,13 +228,9 @@ class RenderEngine:
             Fully rendered HTML
         """
         # First apply diff tag styling
-        html = self.render_diff_tags(text)
+        html_content = self.render_diff_tags(text)
         
-        # Then render Markdown and LaTeX
-        # Note: We need to be careful not to break the HTML from diff tags
-        # For now, we'll render Markdown/LaTeX within the content
-        
-        return html
+        return html_content
     
     def inject_wysiwyg_controls(self) -> str:
         """
@@ -208,22 +315,201 @@ class RenderEngine:
         """
         
         return js_code
-    
+
     def get_katex_header(self) -> str:
         """
         Get KaTeX CSS and JS headers for LaTeX rendering.
         
         Returns:
-            HTML string with KaTeX CDN links
+            HTML string with KaTeX CDN links and auto-render configuration
+            包含渲染失败时显示原文的fallback机制
         """
-        return """
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-                onload="renderMathInElement(document.body, {
-                    delimiters: [
-                        {left: '$$', right: '$$', display: true},
-                        {left: '$', right: '$', display: false}
-                    ]
-                });"></script>
-        """
+        import time
+        # 添加时间戳来避免缓存问题
+        timestamp = str(int(time.time()))
+        
+        # 使用字符串拼接避免f-string的转义问题
+        header = '''
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css?v=''' + timestamp + '''">
+        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js?v=''' + timestamp + '''"></script>
+        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js?v=''' + timestamp + '''"></script>
+        <script>
+        // 等待KaTeX加载完成
+        function waitForKaTeX(callback) {
+            if (typeof renderMathInElement !== 'undefined') {
+                callback();
+            } else {
+                setTimeout(function() { waitForKaTeX(callback); }, 100);
+            }
+        }
+        
+        // 立即开始等待并渲染
+        waitForKaTeX(function() {
+            console.log("✅ KaTeX loaded successfully");
+            
+            // 立即渲染一次
+            renderAllMath();
+            
+            // 短时间内多次渲染，确保初始加载时能渲染
+            setTimeout(renderAllMath, 100);
+            setTimeout(renderAllMath, 300);
+            setTimeout(renderAllMath, 500);
+            setTimeout(renderAllMath, 1000);
+            
+            // 然后每秒检查一次
+            setInterval(renderAllMath, 1000);
+        });
+        
+        // 多种加载事件监听
+        if (document.readyState === 'loading') {
+            document.addEventListener("DOMContentLoaded", function() {
+                console.log("📄 DOMContentLoaded triggered");
+                waitForKaTeX(function() {
+                    setTimeout(renderAllMath, 100);
+                });
+            });
+        } else {
+            // 文档已经加载完成
+            console.log("📄 Document already loaded");
+            waitForKaTeX(function() {
+                renderAllMath();
+            });
+        }
+        
+        // load事件
+        window.addEventListener('load', function() {
+            console.log("🌐 Window loaded");
+            waitForKaTeX(function() {
+                setTimeout(renderAllMath, 100);
+            });
+        });
+        
+        // 监听所有可能的DOM变化
+        waitForKaTeX(function() {
+            const observer = new MutationObserver(function(mutations) {
+                // 只要DOM有变化就尝试渲染
+                setTimeout(renderAllMath, 50);
+            });
+            
+            // 延迟启动observer确保body存在
+            setTimeout(function() {
+                if (document.body) {
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['class', 'data-katex-render']
+                    });
+                    console.log("👁️ DOM监听已启动");
+                }
+            }, 200);
+        });
+        
+        function renderAllMath() {
+            if (typeof renderMathInElement === 'undefined') {
+                return; // 静默失败，避免刷屏
+            }
+            
+            try {
+                // 查找所有标记为需要渲染的容器
+                const targets = document.querySelectorAll('[data-katex-render="true"]');
+                
+                if (targets.length === 0) {
+                    return; // 没有目标就不输出日志
+                }
+                
+                let renderedCount = 0;
+                console.log("🔍 找到 " + targets.length + " 个待渲染容器");
+                
+                targets.forEach(function(elem) {
+                    const hasLaTeX = elem.textContent.includes('$');
+                    const alreadyRendered = elem.querySelector('.katex') !== null;
+                    
+                    console.log("  📋 容器状态: LaTeX=" + hasLaTeX + ", 已渲染=" + alreadyRendered);
+                    
+                    if (hasLaTeX && !alreadyRendered) {
+                        console.log("  ▶️ 开始渲染:", elem.textContent.substring(0, 50) + "...");
+                        
+                        try {
+                            renderMathInElement(elem, {
+                                delimiters: [
+                                    {left: '$$', right: '$$', display: true},
+                                    {left: '$', right: '$', display: false}
+                                ],
+                                throwOnError: false,
+                                errorColor: '#cc0000',
+                                strict: false,
+                                trust: true
+                            });
+                            
+                            // 检查渲染结果
+                            const katexCount = elem.querySelectorAll('.katex').length;
+                            console.log("  ✅ 渲染完成，生成 " + katexCount + " 个.katex元素");
+                            
+                            // 标记已渲染
+                            elem.setAttribute('data-katex-render', 'done');
+                            renderedCount++;
+                        } catch (renderError) {
+                            console.error("  ❌ 渲染失败:", renderError);
+                        }
+                    }
+                });
+                
+                if (renderedCount > 0) {
+                    console.log("✨ 本次成功渲染 " + renderedCount + " 个容器");
+                }
+            } catch (e) {
+                console.error('❌ renderAllMath错误:', e);
+            }
+        }
+        
+        function checkRenderFailures() {
+            // 查找所有带有 data-fallback 的元素
+            document.querySelectorAll('[data-fallback]').forEach(function(el) {
+                // 检查是否包含 KaTeX 错误或未渲染
+                var hasError = el.querySelector('.katex-error');
+                var hasKatex = el.querySelector('.katex');
+                var text = el.textContent || el.innerText;
+                
+                // 如果有错误，或者没有成功渲染（仍然包含$符号），显示原文
+                if (hasError || (!hasKatex && (text.includes('$') || text.includes('\\\\')))) {
+                    var fallback = el.getAttribute('data-fallback');
+                    if (fallback) {
+                        // 解码HTML实体
+                        var decoded = fallback.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+                        el.innerHTML = '<code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-family: monospace;">' + decoded + '</code>';
+                        el.removeAttribute('data-fallback');
+                    }
+                }
+            });
+        }
+        </script>
+        <style>
+        /* LaTeX 公式样式 */
+        .latex-display {
+            display: block;
+            text-align: center;
+            margin: 15px 0;
+            font-size: 18px;
+        }
+        .latex-inline {
+            display: inline;
+            font-size: 18px;
+        }
+        .katex {
+            font-size: 1.1em !important;
+        }
+        .katex-display {
+            margin: 15px 0 !important;
+        }
+        /* 渲染失败时的样式 */
+        .katex-error {
+            color: inherit !important;
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        </style>
+        '''
+        
+        return header

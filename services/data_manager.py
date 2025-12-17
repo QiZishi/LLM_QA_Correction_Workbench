@@ -190,22 +190,45 @@ class DataManager:
         
         return processed_count, total_loaded
     
-    def should_load_next_batch(self) -> bool:
+    def should_load_next_batch(self, current_index: int = None) -> bool:
         """
         Determine if next batch should be loaded.
         
-        Uses threshold: load when processed_count >= (total_loaded - 10)
+        加载条件：
+        1. 已加载样本总数小于文件总量（还有数据可加载）
+        2. 当前样本索引与已加载样本总数相差10条以内
+        
+        Args:
+            current_index: 当前正在校正的样本索引，如果为None则使用旧逻辑
         
         Returns:
             True if next batch should be loaded, False otherwise
         """
-        if self.current_batch * self.batch_size >= self.total_rows:
-            return False  # No more data available
+        # 检查是否还有数据可加载
+        if not self.has_more_data():
+            return False
         
-        processed_count, total_loaded = self.get_progress()
+        total_loaded = len(self.samples)
+        
+        # 如果提供了当前索引，使用新逻辑
+        if current_index is not None:
+            # 当前样本索引与已加载样本总数相差10条以内时加载
+            remaining_samples = total_loaded - current_index - 1  # 剩余未处理的已加载样本数
+            return remaining_samples <= 10
+        
+        # 旧逻辑：当已处理数量接近已加载总数时加载
+        processed_count, _ = self.get_progress()
         threshold = total_loaded - 10
-        
         return processed_count >= threshold
+    
+    def has_more_data(self) -> bool:
+        """
+        Check if there is more data to load from CSV.
+        
+        Returns:
+            True if more data available, False otherwise
+        """
+        return self.current_batch * self.batch_size < self.total_rows
     
     def load_all_batches_lazy(self):
         """

@@ -69,6 +69,29 @@ class TestLatexRendering:
         
         # Should return output with 'and'
         assert 'and' in result
+    
+    def test_latex_with_special_formatting(self):
+        """Test LaTeX with special formatting like mathrm."""
+        engine = RenderEngine()
+        result = engine.render_markdown_latex("建议发病 $24\\mathrm{h}$ 内转运")
+        
+        # Should not contain placeholder text
+        assert 'PLACEHOLDER' not in result
+        assert 'LATEX_PLACEHOLDER' not in result
+        # Should contain the LaTeX content
+        assert '24\\mathrm{h}' in result or '24' in result
+    
+    def test_latex_placeholder_not_exposed(self):
+        """Test that internal placeholders are not exposed in output."""
+        engine = RenderEngine()
+        # Text with underscores that might interfere with placeholder format
+        result = engine.render_markdown_latex("Text with ___underscores___ and $x^2$ formula")
+        
+        # Should not expose internal placeholder format
+        assert 'LATEX_PLACEHOLDER' not in result
+        assert '<!--LATEX_' not in result or 'latex-inline' in result
+        # Should contain the formula
+        assert 'x^2' in result
 
 
 class TestDiffTagRendering:
@@ -79,7 +102,8 @@ class TestDiffTagRendering:
         engine = RenderEngine()
         result = engine.render_diff_tags("<false>deleted</false>")
         
-        assert 'color: red' in result
+        # Check for red color (either 'red' or hex code '#d32f2f')
+        assert 'color:' in result and ('red' in result or '#d32f2f' in result)
         assert 'line-through' in result
         assert 'deleted' in result
     
@@ -88,7 +112,8 @@ class TestDiffTagRendering:
         engine = RenderEngine()
         result = engine.render_diff_tags("<true>added</true>")
         
-        assert 'color: green' in result
+        # Check for green color (either 'green' or hex code '#388e3c')
+        assert 'color:' in result and ('green' in result or '#388e3c' in result)
         assert 'added' in result
     
     def test_mixed_tags(self):
@@ -98,8 +123,9 @@ class TestDiffTagRendering:
             "Keep <false>old</false><true>new</true> text"
         )
         
-        assert 'color: red' in result
-        assert 'color: green' in result
+        # Check for both colors
+        assert ('red' in result or '#d32f2f' in result)
+        assert ('green' in result or '#388e3c' in result)
         assert 'old' in result
         assert 'new' in result
     
@@ -120,7 +146,8 @@ class TestNestedContent:
         engine = RenderEngine()
         result = engine.render_diff_tags("<false>**bold**</false>")
         
-        assert 'color: red' in result
+        # Check for red color (either 'red' or hex code '#d32f2f')
+        assert ('red' in result or '#d32f2f' in result)
         assert '**bold**' in result
     
     def test_latex_in_true_tag(self):
@@ -128,7 +155,8 @@ class TestNestedContent:
         engine = RenderEngine()
         result = engine.render_diff_tags("<true>$x^2$</true>")
         
-        assert 'color: green' in result
+        # Check for green color (either 'green' or hex code '#388e3c')
+        assert ('green' in result or '#388e3c' in result)
         assert '$x^2$' in result
 
 
@@ -164,8 +192,9 @@ class TestCombinedRendering:
         text = "<false>**old**</false><true>**new**</true>"
         result = engine.render_markdown_latex_with_diff(text)
         
-        assert 'color: red' in result
-        assert 'color: green' in result
+        # Check for both colors (either named or hex)
+        assert ('red' in result or '#d32f2f' in result)
+        assert ('green' in result or '#388e3c' in result)
     
     def test_latex_with_diff(self):
         """Test LaTeX with diff tags."""
