@@ -76,14 +76,16 @@ class DataManager:
                 f"需要的列: {required_columns}"
             )
         
-        # Get total row count efficiently (without loading all data into memory)
+        # Get total row count accurately using pandas (only count valid data rows)
+        # This ensures we count only rows with actual data, not empty lines
         try:
-            # Use iterator to count rows without loading all data
-            with open(self.csv_path, 'r', encoding='utf-8') as f:
-                self.total_rows = sum(1 for line in f) - 1  # Subtract header row
+            # Read the entire CSV to get accurate row count
+            df_full = pd.read_csv(self.csv_path, encoding='utf-8')
+            # Count only non-empty rows (rows where instruction is not null)
+            self.total_rows = len(df_full[df_full['instruction'].notna()])
         except UnicodeDecodeError:
-            with open(self.csv_path, 'r', encoding='gbk') as f:
-                self.total_rows = sum(1 for line in f) - 1  # Subtract header row
+            df_full = pd.read_csv(self.csv_path, encoding='gbk')
+            self.total_rows = len(df_full[df_full['instruction'].notna()])
     
     @monitor_performance("load_next_batch")
     def load_next_batch(self) -> List[Sample]:

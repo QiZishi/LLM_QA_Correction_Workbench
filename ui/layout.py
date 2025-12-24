@@ -60,11 +60,28 @@ button {
     font-family: "Times New Roman", "SimSun", "宋体", serif !important;
 }
 
-/* 参考内容的容器样式 - 在这里设置滚动 */
+/* ========== 关键：参考内容区域LaTeX渲染容器 ========== */
+/* ⚠️ 重要：模仿数据校正区域文本框的样式，滚动条在边框内部 */
 #reference_display {
+    border: 2px solid #1976d2 !important;
+    border-radius: 8px !important;
     max-height: 600px !important;
     height: 600px !important;
     overflow-y: auto !important;
+    overflow-x: hidden !important;
+    padding: 0 !important;
+    background: #fafafa !important;
+}
+
+/* 内层容器：LaTeX在此渲染，无边框只有内边距 */
+.reference-content {
+    font-size: 18px !important;
+    line-height: 1.8 !important;
+    font-family: "Times New Roman", "SimSun", "宋体", serif !important;
+    padding: 15px !important;
+    background: transparent !important;
+    border: none !important;
+    box-sizing: border-box !important;
 }
 
 /* 样本列表样式 */
@@ -76,6 +93,16 @@ button {
     border-radius: 8px;
     padding: 10px;
     font-family: "Times New Roman", "SimSun", "宋体", serif !important;
+}
+
+/* 隐藏的样本点击索引输入框 */
+.hidden-click-input {
+    position: absolute !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
 }
 
 /* 进度条样式 */
@@ -344,14 +371,14 @@ def get_global_css() -> str:
 
 def create_header_with_instructions(components: Dict[str, Any]) -> None:
     """创建标题行与使用说明、设置（第一行）"""
-    # 第一行：应用标题、使用说明、设置在同一行
+    # 第一行：应用标题、使用说明、设置在同一行，对齐下方三列比例(1:5:4)
     with gr.Row():
-        # 应用标题
-        with gr.Column(scale=2):
-            gr.Markdown("# 🎯 大模型问答数据校正工作台")
+        # 应用标题 - 对齐左侧导航列
+        with gr.Column(scale=1):
+            gr.Markdown("# 🎯 大模型数据校正")
         
-        # 使用说明下拉框
-        with gr.Column(scale=2):
+        # 使用说明下拉框 - 对齐中间数据校正区域
+        with gr.Column(scale=5):
             with gr.Accordion("📖 使用说明（首次使用必看！）", open=False, elem_classes=["accordion-container"]):
                 gr.Markdown("""
 **详细操作流程：**
@@ -405,10 +432,10 @@ def create_header_with_instructions(components: Dict[str, Any]) -> None:
 def create_upload_export_row(components: Dict[str, Any]) -> None:
     """创建数据加载状况、上传CSV、导出文件下载、导出按钮（第二行）"""
     with gr.Row():
-        # 数据加载状况显示 - 使用HTML组件避免双层窗体
-        with gr.Column(scale=3):
+        # 数据加载状况显示 - 缩短宽度
+        with gr.Column(scale=0.3):
             components['upload_status'] = gr.HTML(
-                '<div class="load-status">📁 请上传CSV文件开始校正工作</div>'
+                '<div class="load-status">📁 等待上传CSV文件<br>当前样本: - / -</div>'
             )
         
         # 上传CSV文件
@@ -422,7 +449,7 @@ def create_upload_export_row(components: Dict[str, Any]) -> None:
             )
         
         # 导出按钮
-        with gr.Column(scale=1):
+        with gr.Column(scale=2):
             components['export_btn'] = gr.Button(
                 "💾 导出已校正数据",
                 size="lg",
@@ -445,11 +472,11 @@ def create_upload_export_row(components: Dict[str, Any]) -> None:
 def create_column_titles() -> None:
     """创建三列标题行（第四行）"""
     with gr.Row(elem_classes=["compact-row"]):
-        with gr.Column(scale=3):  # 增大左侧列宽度
+        with gr.Column(scale=1):  # 左侧导航列：最小宽度
             gr.HTML('<div class="column-title">📋 样本导航</div>')
-        with gr.Column(scale=4):  # 相应调整中间列
+        with gr.Column(scale=5):  # 中间数据校正区域：最大宽度
             gr.HTML('<div class="column-title">📝 数据校正区域</div>')
-        with gr.Column(scale=3):
+        with gr.Column(scale=4):  # 右侧参考内容列：中等宽度
             gr.HTML('<div class="column-title">📚 参考内容</div>')
 
 
@@ -481,6 +508,24 @@ def create_left_column(components: Dict[str, Any]) -> None:
             size="sm",
             elem_classes=["nav-btn"]
         )
+    
+    # 统计显示框（放在下一条按钮下方，宽度一致）
+    components['stats_display'] = gr.HTML(
+        '<div style="padding: 8px; margin: 5px 0; background: #f5f5f5; border: 1px solid #1976d2; border-radius: 5px; font-size: 14px; text-align: center;">📊 统计: 待处理 <span style="color: #9E9E9E;">0</span> | 已校正 <span style="color: #4CAF50;">0</span> | 已丢弃 <span style="color: #F44336;">0</span></div>'
+    )
+    
+    # 隐藏的样本索引输入框（用于接收点击事件）
+    # 使用elem_classes来CSS隐藏，而不是visible=False（那样会完全不渲染）
+    components['sample_click_index'] = gr.Number(
+        value=-1,
+        label="",
+        show_label=False,
+        elem_id="sample_click_index",
+        elem_classes="hidden-click-input",
+        minimum=-1,
+        maximum=999999,
+        container=False
+    )
     
     # 样本导航列表（移除了进度条）
     components['sample_list'] = gr.HTML(
@@ -528,6 +573,13 @@ def create_center_column(components: Dict[str, Any]) -> None:
             "🔍 生成校正预览",
             size="lg",
             elem_classes=["primary-btn"]
+        )
+        
+        # 丢弃此样本按钮（阶段一）
+        components['discard_phase1_btn'] = gr.Button(
+            "❌ 丢弃此样本",
+            size="lg",
+            elem_classes=["danger-btn"]
         )
     
     # Phase 2: 校正确认
@@ -607,8 +659,9 @@ def create_three_column_layout() -> Dict[str, Any]:
     Returns:
         包含所有UI组件的字典
     """
-    components = {}
     
+    components = {}
+
     # 注入全局CSS
     gr.HTML(get_global_css())
     
@@ -623,8 +676,8 @@ def create_three_column_layout() -> Dict[str, Any]:
     
     # 第四行开始：三列详细布局
     with gr.Row():
-        # 左侧区域：导航 + 展开按钮
-        with gr.Column(scale=3):
+        # 左侧区域：导航 + 展开按钮（最小宽度）
+        with gr.Column(scale=1):
             # 左侧列：导航 (可收起)
             with gr.Column(visible=True) as left_col:
                 components['left_col'] = left_col
@@ -638,12 +691,12 @@ def create_three_column_layout() -> Dict[str, Any]:
                 elem_classes=["nav-btn"]
             )
         
-        # 中间列：编辑器 (scale=4, 相应调整)
-        with gr.Column(scale=4):
+        # 中间列：编辑器（最大宽度）
+        with gr.Column(scale=5):
             create_center_column(components)
         
-        # 右侧列：参考内容 (scale=3)
-        with gr.Column(scale=3):
+        # 右侧列：参考内容（中等宽度）
+        with gr.Column(scale=4):
             create_right_column(components)
     
     return components

@@ -5,6 +5,10 @@ LLM-QA Correction Workbench
 Main entry point for the Gradio application.
 """
 
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='.*too many values to unpack.*')
+
 import gradio as gr
 from ui.layout import create_three_column_layout, get_global_css
 from ui.event_handlers import (
@@ -16,18 +20,19 @@ from ui.event_handlers import (
     handle_refresh_diff,
     handle_export,
     handle_navigation,
-    update_export_format
+    update_export_format,
+    handle_sample_click
 )
 from services import RenderEngine
 
 
 def main():
     """Main application entry point."""
-    # Initialize render engine for KaTeX support
+    # Initialize render engine
     render_engine = RenderEngine()
     
     with gr.Blocks(
-        title="大模型问答数据校正工作台",
+        title="大模型数据校正",
         theme=gr.themes.Soft(),
         head=render_engine.get_katex_header(),
         css="""
@@ -65,24 +70,25 @@ def main():
         
         # CSV Upload Handler
         def on_csv_upload(file_path, batch_size, state):
+            from ui.event_handlers import get_stats_html
             new_state, msg = handle_csv_upload(file_path, batch_size)
             # Preserve export format from previous state
             new_state['export_format'] = state.get('export_format', 'messages')
             new_state['custom_filename'] = state.get('custom_filename', '')
             
-            # 包装状态消息为HTML格式
-            status_html = f'<div class="load-status">{msg}</div>'
-            
             if new_state.get('samples'):
-                instruction, output, ref_html, progress, sample_list = load_sample_to_ui(new_state)
+                instruction, output, ref_html, status_html, progress, sample_list = load_sample_to_ui(new_state)
+                stats_html = get_stats_html(new_state)
                 return (
-                    new_state, status_html, instruction, output, ref_html, sample_list,
+                    new_state, status_html, instruction, output, ref_html, sample_list, stats_html,
                     gr.update(visible=True), gr.update(visible=False)
                 )
+            # 如果加载失败，使用错误消息HTML
             return (
-                new_state, status_html, "", "", 
+                new_state, msg, "", "", 
                 '<div class="reference-content" style="min-height: 500px;">暂无数据</div>',
                 '<div class="sample-list-container">暂无数据</div>',
+                '<div style="padding: 8px; margin: 5px 0; background: #f5f5f5; border: 1px solid #1976d2; border-radius: 5px; font-size: 14px; text-align: center;">📊 统计: 待处理 <span style="color: #9E9E9E;">0</span> | 已校正 <span style="color: #4CAF50;">0</span> | 已丢弃 <span style="color: #F44336;">0</span></div>',
                 gr.update(visible=True), gr.update(visible=False)
             )
         
@@ -96,6 +102,7 @@ def main():
                 components['output_editor'],
                 components['reference_display'],
                 components['sample_list'],
+                components['stats_display'],
                 components['phase1_group'],
                 components['phase2_group']
             ]
@@ -103,9 +110,11 @@ def main():
         
         # Navigation Handlers
         def on_navigation(direction, state):
-            state, instruction, output, ref_html, progress, sample_list = handle_navigation(direction, state)
+            from ui.event_handlers import get_stats_html
+            state, status_html, instruction, output, ref_html, progress, sample_list = handle_navigation(direction, state)
+            stats_html = get_stats_html(state)
             return (
-                state, instruction, output, ref_html, sample_list,
+                state, status_html, instruction, output, ref_html, sample_list, stats_html,
                 gr.update(visible=True), gr.update(visible=False)
             )
         
@@ -114,10 +123,12 @@ def main():
             inputs=[app_state],
             outputs=[
                 app_state,
+                components['upload_status'],
                 components['instruction_editor'],
                 components['output_editor'],
                 components['reference_display'],
                 components['sample_list'],
+                components['stats_display'],
                 components['phase1_group'],
                 components['phase2_group']
             ]
@@ -128,12 +139,35 @@ def main():
             inputs=[app_state],
             outputs=[
                 app_state,
+                components['upload_status'],
                 components['instruction_editor'],
                 components['output_editor'],
                 components['reference_display'],
                 components['sample_list'],
+                components['stats_display'],
                 components['phase1_group'],
                 components['phase2_group']
+            ]
+        )
+        
+        # 样本点击跳转事件
+        components['sample_click_index'].change(
+            fn=handle_sample_click,
+            inputs=[components['sample_click_index'], app_state],
+            outputs=[
+                app_state,
+                components['upload_status'],
+                components['instruction_editor'],
+                components['output_editor'],
+                components['reference_display'],
+                components['sample_list'],
+                components['stats_display'],
+                components['phase1_group'],
+                components['phase2_group'],
+                components['discard_phase1_btn'],
+                components['discard_btn'],
+                components['submit_btn'],
+                components['refresh_btn']
             ]
         )
         
@@ -142,7 +176,7 @@ def main():
             from services import DiffEngine, RenderEngine
             
             if not state.get('samples'):
-                gr.Warning("无数据可处理")
+                gr.Warning("无数据可处理",    duration=2.0)
                 no_data_html = '<div>无数据</div>'
                 return (
                     state, 
@@ -187,7 +221,7 @@ def main():
                 )
                 
             except Exception as e:
-                gr.Error(f"生成预览失败: {str(e)}")
+                gr.Error(f"生成预览失败: {str(e)}",    duration=2.0)
                 error_html = f'<div style="color: red;">生成预览失败: {str(e)}</div>'
                 return (
                     state,
@@ -240,9 +274,9 @@ def main():
                     current_sample.final_instruction = instruction_diff
                     current_sample.final_output = output_diff
             
-            state, instruction, output, reference, progress, sample_list, phase1_vis, phase2_vis = handle_submit(state)
+            state, status_html, instruction, output, reference, progress, sample_list, phase1_vis, phase2_vis = handle_submit(state)
             return (
-                state, instruction, output, reference, progress, sample_list,
+                state, status_html, instruction, output, reference, sample_list,
                 gr.update(visible=phase1_vis), gr.update(visible=phase2_vis)
             )
         
@@ -251,6 +285,7 @@ def main():
             inputs=[app_state],
             outputs=[
                 app_state,
+                components['upload_status'],
                 components['instruction_editor'],
                 components['output_editor'],
                 components['reference_display'],
@@ -262,9 +297,9 @@ def main():
         
         # Discard Handler
         def on_discard(state):
-            state, instruction, output, reference, progress, sample_list, phase1_vis, phase2_vis = handle_discard(state)
+            state, status_html, instruction, output, reference, progress, sample_list, phase1_vis, phase2_vis = handle_discard(state)
             return (
-                state, instruction, output, reference, progress, sample_list,
+                state, status_html, instruction, output, reference, sample_list,
                 gr.update(visible=phase1_vis), gr.update(visible=phase2_vis)
             )
         
@@ -273,12 +308,40 @@ def main():
             inputs=[app_state],
             outputs=[
                 app_state,
+                components['upload_status'],
                 components['instruction_editor'],
                 components['output_editor'],
                 components['reference_display'],
                 components['sample_list'],
                 components['phase1_group'],
                 components['phase2_group']
+            ]
+        )
+        
+        # Discard Phase 1 Handler
+        def on_discard_phase1(state):
+            from ui.event_handlers import handle_discard_phase1, get_stats_html
+            state, status_html, instruction, output, reference, progress, sample_list, btn_text = handle_discard_phase1(state)
+            stats_html = get_stats_html(state)
+            return (
+                state, status_html, instruction, output, reference, sample_list, stats_html,
+                gr.update(visible=True), gr.update(visible=False), gr.update(value=btn_text)
+            )
+        
+        components['discard_phase1_btn'].click(
+            fn=on_discard_phase1,
+            inputs=[app_state],
+            outputs=[
+                app_state,
+                components['upload_status'],
+                components['instruction_editor'],
+                components['output_editor'],
+                components['reference_display'],
+                components['sample_list'],
+                components['stats_display'],
+                components['phase1_group'],
+                components['phase2_group'],
+                components['discard_phase1_btn']
             ]
         )
         
@@ -434,10 +497,6 @@ def main():
             ]
         )
         
-        # Footer
-        gr.HTML('<hr style="border: 1px solid #e0e0e0; margin: 20px 0;">')
-        gr.Markdown("✅ 系统已就绪，请上传CSV文件开始校正工作")
-    
     return app
 
 

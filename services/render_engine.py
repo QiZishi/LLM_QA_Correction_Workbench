@@ -153,7 +153,9 @@ class RenderEngine:
             # 4. 重置 Markdown 处理器
             self.md.reset()
             
-            # 5. 包装在带样式的容器中，使用data属性标记需要渲染
+            # ========== 关键步骤：标记LaTeX渲染容器 ==========
+            # ⚠️ data-katex-render="true" 让JavaScript能找到并渲染LaTeX
+            # 不要移除这个属性，否则LaTeX无法渲染！
             return f'''
             <div class="reference-content katex-render-target" data-katex-render="true" style="font-size: 18px; line-height: 1.8; padding: 15px;">
                 {html_content}
@@ -210,7 +212,8 @@ class RenderEngine:
         if latex_placeholders:
             protected_text = self._restore_latex(protected_text, latex_placeholders)
         
-        # 5. 标记为需要渲染的内容
+        # ========== 关键：标记diff内容中的LaTeX ==========
+        # ⚠️ data-katex-render="true" 确保差异显示中的LaTeX也能被渲染
         return f'<div class="katex-render-target" data-katex-render="true">{protected_text}</div>'
     
     def render_markdown_latex_with_diff(self, text: str) -> str:
@@ -318,22 +321,31 @@ class RenderEngine:
 
     def get_katex_header(self) -> str:
         """
-        Get KaTeX CSS and JS headers for LaTeX rendering.
+        ========== 关键方法：KaTeX LaTeX渲染配置 ==========
+        此方法生成KaTeX所需的CSS和JavaScript
+        
+        ⚠️ 重要注意事项：
+        1. script标签不能使用defer属性（会导致加载顺序错误）
+        2. 必须保持当前的加载顺序：katex.min.js → auto-render.min.js → 自定义JS
+        3. renderAllMath函数通过data-katex-render属性查找需要渲染的元素
+        4. 每秒自动检查并渲染新增的LaTeX内容
         
         Returns:
             HTML string with KaTeX CDN links and auto-render configuration
-            包含渲染失败时显示原文的fallback机制
         """
         import time
-        # 添加时间戳来避免缓存问题
-        timestamp = str(int(time.time()))
+        import random
+        # 添加随机数+时间戳来强制浏览器每次都重新加载
+        cache_buster = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
         
-        # 使用字符串拼接避免f-string的转义问题
+        # ========== 关键：不使用defer，确保同步加载 ==========
+        # 使用unpkg CDN替代jsDelivr，在中国更稳定
         header = '''
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css?v=''' + timestamp + '''">
-        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js?v=''' + timestamp + '''"></script>
-        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js?v=''' + timestamp + '''"></script>
+        <link rel="stylesheet" href="https://unpkg.com/katex@0.16.9/dist/katex.min.css?v=''' + cache_buster + '''">
+        <script src="https://unpkg.com/katex@0.16.9/dist/katex.min.js?v=''' + cache_buster + '''"></script>
+        <script src="https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js?v=''' + cache_buster + '''"></script>
         <script>
+        /* ========== 关键函数：等待KaTeX加载 ========== */
         // 等待KaTeX加载完成
         function waitForKaTeX(callback) {
             if (typeof renderMathInElement !== 'undefined') {
@@ -405,6 +417,13 @@ class RenderEngine:
             }, 200);
         });
         
+        /* ========== 关键函数：渲染所有LaTeX公式 ========== */
+        /* ⚠️ 重要配置说明：
+         * 1. 查找所有data-katex-render="true"的元素
+         * 2. 使用KaTeX auto-render渲染其中的$...$和$$...$$
+         * 3. 渲染完成后标记为data-katex-render="done"避免重复
+         * 4. 不要修改delimiters配置（$和$$是标准LaTeX语法）
+         */
         function renderAllMath() {
             if (typeof renderMathInElement === 'undefined') {
                 return; // 静默失败，避免刷屏
@@ -422,6 +441,10 @@ class RenderEngine:
                 console.log("🔍 找到 " + targets.length + " 个待渲染容器");
                 
                 targets.forEach(function(elem) {
+                    if (!elem || !elem.textContent) {
+                        return; // 跳过空元素
+                    }
+                    
                     const hasLaTeX = elem.textContent.includes('$');
                     const alreadyRendered = elem.querySelector('.katex') !== null;
                     
@@ -483,6 +506,40 @@ class RenderEngine:
                 }
             });
         }
+        
+        // 样本点击跳转处理函数
+        window.handleSampleClick = function(sampleIndex) {
+            console.log('Clicking sample:', sampleIndex);
+            // 查找所有number类型输入框
+            var allInputs = document.querySelectorAll('input[type="number"]');
+            console.log('Total number inputs found:', allInputs.length);
+            
+            var targetInput = null;
+            
+            // 方法1: 查找值为-1的输入框（sample_click_index的初始值）
+            for (var i = 0; i < allInputs.length; i++) {
+                var inp = allInputs[i];
+                console.log('Checking input', i, '- value:', inp.value, 'min:', inp.min, 'aria-label:', inp.getAttribute('aria-label'));
+                
+                // 查找最小值为-1的输入框（这是我们特意设置的）
+                if (inp.min === '-1') {
+                    targetInput = inp;
+                    console.log('Found target input by min=-1');
+                    break;
+                }
+            }
+            
+            if (targetInput) {
+                console.log('Setting value to:', sampleIndex);
+                targetInput.value = sampleIndex;
+                targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                targetInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                console.log('Events dispatched');
+            } else {
+                console.error('Target input with min=-1 not found!');
+            }
+        };
         </script>
         <style>
         /* LaTeX 公式样式 */
