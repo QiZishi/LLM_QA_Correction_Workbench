@@ -6,6 +6,7 @@ Handles user interactions and state updates.
 
 from typing import Dict, Any, Tuple, List, Optional
 import os
+import re
 import gradio as gr
 from models import Sample
 from utils.validation import (
@@ -14,6 +15,79 @@ from utils.validation import (
     validate_export_preconditions,
     auto_fix_malformed_tags
 )
+
+
+def extract_final_content_from_tags(text: str) -> str:
+    """
+    从包含<true>和<false>标记的文本中提取最终内容。
+    只保留<true>标签内的内容和未标记的内容，去除<false>标签内的内容和所有标记本身。
+    支持处理错误嵌套的标记。
+    
+    策略：
+    1. 先移除所有<true>和</true>标签（保留标签内的内容）
+    2. 再移除所有<false>...</false>区域及其内容
+    3. 清理任何残留的畸形标签
+    
+    Args:
+        text: 包含标记的文本
+    
+    Returns:
+        提取的纯净最终内容
+    """
+    if not text:
+        return text
+    
+    # 检查是否包含标记
+    if '<true>' not in text and '<false>' not in text:
+        return text
+    
+    # 步骤1: 先移除所有<true>和</true>标签（保留内容）
+    text = text.replace('<true>', '').replace('</true>', '')
+    
+    # 步骤2: 使用状态机移除<false>区域及其内容
+    result = []
+    i = 0
+    in_false_depth = 0
+    
+    while i < len(text):
+        # 检查是否遇到<false>标签
+        if text[i:i+7] == '<false>':
+            in_false_depth += 1
+            i += 7
+            continue  # 跳过<false>标签
+        elif text[i:i+8] == '</false>':
+            in_false_depth = max(0, in_false_depth - 1)
+            i += 8
+            continue  # 跳过</false>标签
+        
+        # 普通字符：只有不在<false>区域内时才保留
+        if in_false_depth == 0:
+            result.append(text[i])
+        
+        i += 1
+    
+    text = ''.join(result)
+    
+    # 步骤3: 清理任何残留的畸形标签
+    text = text.replace('<true>', '').replace('</true>', '')
+    text = text.replace('<false>', '').replace('</false>', '')
+    
+    return text
+
+
+def has_diff_tags(text: str) -> bool:
+    """
+    检查文本是否包含差异标记。
+    
+    Args:
+        text: 待检查的文本
+    
+    Returns:
+        如果包含<true>或<false>标记则返回True
+    """
+    if not text:
+        return False
+    return '<true>' in text or '<false>' in text
 
 
 def generate_status_html(status_text: str, current_sample_num: int = 0, total_samples: int = 0) -> str:
@@ -125,6 +199,7 @@ def update_progress_display(corrected_count: int, total_loaded: int, total_sampl
 def generate_sample_list_html(samples: list, current_index: int) -> str:
     """
     Generate HTML for sample list with status markers.
+    当前样本置顶显示。
     
     Args:
         samples: List of Sample objects
@@ -141,7 +216,11 @@ def generate_sample_list_html(samples: list, current_index: int) -> str:
          border: 1px solid #1976d2; border-radius: 8px; padding: 10px; font-size: 16px;">
     ''']
     
-    for i, sample in enumerate(samples):
+    # 先显示当前样本（置顶）
+    if 0 <= current_index < len(samples):
+        sample = samples[current_index]
+        i = current_index
+        
         # Status marker
         if sample.status == "corrected":
             marker = "✅"
@@ -157,9 +236,9 @@ def generate_sample_list_html(samples: list, current_index: int) -> str:
             status_text = "待处理"
         
         # Highlight current sample
-        bg_color = "#E3F2FD" if i == current_index else "#ffffff"
-        border_width = "4px" if i == current_index else "3px"
-        font_weight = "bold" if i == current_index else "normal"
+        bg_color = "#E3F2FD"
+        border_width = "4px"
+        font_weight = "bold"
         
         # Truncate instruction for display
         instruction_preview = sample.instruction[:40] + "..." if len(sample.instruction) > 40 else sample.instruction
@@ -175,7 +254,54 @@ def generate_sample_list_html(samples: list, current_index: int) -> str:
              data-sample-index="{i}">
             <div style="display: flex; justify-content: space-between; align-items: center;">
                 <span style="color: {color}; font-size: 18px;">{marker}</span>
-                <span style="font-size: 14px; color: #666;">样本编号{sample.id}</span>
+                <span style="font-size: 14px; color: #666;">样本 {sample.id}</span>
+                <span style="font-size: 12px; color: {color};">{status_text}</span>
+            </div>
+            <div style="margin-top: 5px; font-size: 14px; color: #333; line-height: 1.4;">
+                {instruction_preview}
+            </div>
+        </div>
+        ''')
+    
+    # 然后显示其他所有样本
+    for i, sample in enumerate(samples):
+        if i == current_index:
+            continue  # 跳过当前样本，已经显示在顶部
+        
+        # Status marker
+        if sample.status == "corrected":
+            marker = "✅"
+            color = "#4CAF50"
+            status_text = "已校正"
+        elif sample.status == "discarded":
+            marker = "❌"
+            color = "#F44336"
+            status_text = "已丢弃"
+        else:
+            marker = "⭕"
+            color = "#9E9E9E"
+            status_text = "待处理"
+        
+        # Not current sample
+        bg_color = "#ffffff"
+        border_width = "3px"
+        font_weight = "normal"
+        
+        # Truncate instruction for display
+        instruction_preview = sample.instruction[:40] + "..." if len(sample.instruction) > 40 else sample.instruction
+        # Escape HTML
+        import html
+        instruction_preview = html.escape(instruction_preview)
+        
+        html_parts.append(f'''
+        <div onclick="handleSampleClick({i})" 
+             style="padding: 10px; margin: 5px 0; background: {bg_color}; 
+                    border-left: {border_width} solid {color}; border-radius: 0 5px 5px 0;
+                    font-weight: {font_weight}; cursor: pointer;"
+             data-sample-index="{i}">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: {color}; font-size: 18px;">{marker}</span>
+                <span style="font-size: 14px; color: #666;">样本 {sample.id}</span>
                 <span style="font-size: 12px; color: {color};">{status_text}</span>
             </div>
             <div style="margin-top: 5px; font-size: 14px; color: #333; line-height: 1.4;">
@@ -449,9 +575,9 @@ def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, 
             gr.Warning(error_msg,    duration=2.0)
             return app_state, f"<div>{error_msg}</div>", "", f"<div>{error_msg}</div>", "", True, False
         
-        # Store edited content
-        current_sample.edited_instruction = instruction
-        current_sample.edited_output = output
+        # Store edited content (user's clean input)
+        current_sample.final_instruction = instruction
+        current_sample.final_output = output
         
         # Compute diff for both instruction and output
         diff_engine = DiffEngine()
@@ -462,16 +588,22 @@ def handle_generate_preview(instruction: str, output: str, app_state: Dict[str, 
             if current_sample.instruction != instruction:
                 instruction_diff_result = diff_engine.compute_diff(current_sample.instruction, instruction)
                 instruction_diff_html = render_engine.render_diff_tags(instruction_diff_result)
+                # 保存带标记的差异结果到edited_instruction（用于导出）
+                current_sample.edited_instruction = instruction_diff_result
             else:
                 # No change, just render the instruction
                 instruction_diff_html = f'<div class="katex-render-target" data-katex-render="true">{instruction}</div>'
+                current_sample.edited_instruction = instruction
             
             # Compute diff for output
-            output_diff_result = diff_engine.compute_diff(current_sample.output, output)
-            output_diff_html = render_engine.render_diff_tags(output_diff_result)
-            
-            # Store diff results
-            current_sample.diff_result = output_diff_result
+            if current_sample.output != output:
+                output_diff_result = diff_engine.compute_diff(current_sample.output, output)
+                output_diff_html = render_engine.render_diff_tags(output_diff_result)
+                # 保存带标记的差异结果到edited_output（用于导出）
+                current_sample.edited_output = output_diff_result
+            else:
+                output_diff_html = f'<div class="katex-render-target" data-katex-render="true">{output}</div>'
+                current_sample.edited_output = output
             
         except TimeoutError:
             gr.Error("差异计算超时，文本可能过长",    duration=2.0)
@@ -713,7 +845,7 @@ def handle_export(app_state: Dict[str, Any]) -> Tuple[str, str]:
         return None, f"❌ 导出失败: {str(e)}"
 
 
-def handle_navigation(direction: str, app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str, str, str, str]:
+def handle_navigation(direction: str, app_state: Dict[str, Any]) -> Tuple:
     """
     Handle previous/next navigation.
     
@@ -722,12 +854,19 @@ def handle_navigation(direction: str, app_state: Dict[str, Any]) -> Tuple[Dict[s
         app_state: Current application state
     
     Returns:
-        Tuple of (updated_app_state, status_html, instruction, output, reference_html, progress_md, sample_list_html)
+        Tuple of 18 values: app_state, status, instruction, output, reference, sample_list, stats,
+                           phase1_visible, phase2_visible, discard_phase1_btn, generate_preview_btn,
+                           discard_btn, submit_btn, refresh_btn,
+                           corrected_instruction_editor, corrected_output_editor,
+                           corrected_instruction_display, corrected_output_display
     """
     if not app_state.get('samples'):
         gr.Warning("无数据可导航", duration=1.0)
         error_status = generate_status_html("⚠️ 无数据可导航")
-        return app_state, error_status, "", "", "<div>无数据</div>", "**进度**: 0 / 0", "<div>无数据</div>"
+        return (app_state, error_status, "", "", "<div>无数据</div>", "<div>无数据</div>", "<div>无数据</div>",
+                gr.update(visible=False), gr.update(visible=False),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                "", "", "<div>无数据</div>", "<div>无数据</div>")
     
     try:
         current_index = app_state['current_index']
@@ -766,14 +905,103 @@ def handle_navigation(direction: str, app_state: Dict[str, Any]) -> Tuple[Dict[s
                 # Continue anyway
         
         # Load sample to UI
-        instruction, output, reference_html, status_html, progress_md, sample_list_html = load_sample_to_ui(app_state)
+        instruction, output, reference_html, status_html, _, sample_list_html = load_sample_to_ui(app_state)
+        stats_html = generate_stats_html(app_state.get('samples', []))
         
-        return app_state, status_html, instruction, output, reference_html, progress_md, sample_list_html
+        # 获取当前样本并根据状态决定显示哪个阶段
+        current_sample = app_state['samples'][app_state['current_index']]
+        
+        # 已丢弃和未处理的都显示阶段1
+        phase1_visible = gr.update(visible=(current_sample.status in ["unprocessed", "discarded"]))
+        phase2_visible = gr.update(visible=(current_sample.status == "corrected"))
+        
+        # 根据状态设置按钮文本和样式
+        if current_sample.status == "discarded":
+            discard_btn_update = gr.update(value="♻️ 恢复此样本", elem_classes=["restore-btn"])
+            preview_btn_visible = gr.update(visible=False)
+        else:
+            discard_btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+            preview_btn_visible = gr.update(visible=True)
+        
+        show_phase2_btns = True
+        
+        # 如果样本状态为corrected，渲染阶段2的内容（使用已存储的edited_*，不重复计算diff）
+        corrected_instruction_text = ""
+        corrected_output_text = ""
+        corrected_instruction_html = "<div>无数据</div>"
+        corrected_output_html = "<div>无数据</div>"
+        
+        if current_sample.status == "corrected":
+            from services import RenderEngine
+            
+            try:
+                render_engine = RenderEngine()
+                
+                # 对于已校正样本，edited_*字段已包含校正结果（带标签），直接使用不重复计算diff
+                # 编辑区使用final_*字段（纯净内容，不含标签）
+                
+                # 获取已存储的edited内容（带标签的校正结果）
+                edited_instruction = current_sample.edited_instruction if current_sample.edited_instruction else ''
+                edited_output = current_sample.edited_output if current_sample.edited_output else ''
+                
+                # 始终从edited_*重新提取final_*，确保编辑区显示正确的纯净内容
+                # 不信任缓存的final_*值，因为可能被污染
+                final_instruction = extract_final_content_from_tags(edited_instruction) if edited_instruction else ''
+                final_output = extract_final_content_from_tags(edited_output) if edited_output else ''
+                
+                # 更新缓存
+                current_sample.final_instruction = final_instruction
+                current_sample.final_output = final_output
+                
+                # 直接使用已存储的edited_*内容渲染（不重复调用diff算法）
+                if edited_instruction:
+                    if has_diff_tags(edited_instruction):
+                        # 包含标签，直接渲染
+                        corrected_instruction_html = render_engine.render_diff_tags(edited_instruction)
+                    else:
+                        # 不包含标签，直接显示（已校正但无变化）
+                        corrected_instruction_html = f'<div class="katex-render-target" data-katex-render="true">{edited_instruction}</div>'
+                else:
+                    corrected_instruction_html = "<div>无校正数据</div>"
+                
+                if edited_output:
+                    if has_diff_tags(edited_output):
+                        corrected_output_html = render_engine.render_diff_tags(edited_output)
+                    else:
+                        corrected_output_html = f'<div class="katex-render-target" data-katex-render="true">{edited_output}</div>'
+                else:
+                    corrected_output_html = "<div>无校正数据</div>"
+                
+                # 编辑区显示纯净内容
+                corrected_instruction_text = final_instruction
+                corrected_output_text = final_output
+                
+            except Exception as e:
+                gr.Warning(f"渲染失败: {str(e)}", duration=2.0)
+                corrected_instruction_html = f"<div>渲染失败: {str(e)}</div>"
+                corrected_output_html = f"<div>渲染失败: {str(e)}</div>"
+                corrected_instruction_text = ""
+                corrected_output_text = ""
+        
+        return (app_state, status_html, instruction, output, reference_html, sample_list_html, stats_html,
+               phase1_visible, phase2_visible,
+               discard_btn_update,
+               preview_btn_visible,
+               gr.update(visible=show_phase2_btns),
+               gr.update(visible=show_phase2_btns),
+               gr.update(visible=show_phase2_btns),
+               corrected_instruction_text,
+               corrected_output_text,
+               corrected_instruction_html,
+               corrected_output_html)
         
     except Exception as e:
         gr.Error(f"导航失败: {str(e)}", duration=1.0)
         error_status = generate_status_html(f"❌ 导航失败: {str(e)}")
-        return app_state, error_status, "", "", "<div>导航失败</div>", "**进度**: 0 / 0", "<div>无数据</div>"
+        return (app_state, error_status, "", "", "<div>导航失败</div>", "<div>无数据</div>", "<div>无数据</div>",
+                gr.update(visible=False), gr.update(visible=False),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                "", "", "<div>无数据</div>", "<div>无数据</div>")
 
 
 def handle_sample_click(sample_index: int, app_state: Dict[str, Any]) -> Tuple:
@@ -785,15 +1013,19 @@ def handle_sample_click(sample_index: int, app_state: Dict[str, Any]) -> Tuple:
         app_state: Current application state
     
     Returns:
-        Tuple of 13 values: app_state, status, instruction, output, reference, sample_list, stats,
-                           phase1_visible, phase2_visible, discard_phase1_btn, discard_btn, submit_btn, refresh_btn
+        Tuple of 18 values: app_state, status, instruction, output, reference, sample_list, stats,
+                           phase1_visible, phase2_visible, discard_phase1_btn, generate_preview_btn,
+                           discard_btn, submit_btn, refresh_btn,
+                           corrected_instruction_editor, corrected_output_editor,
+                           corrected_instruction_display, corrected_output_display
     """
     if not app_state.get('samples'):
         gr.Warning("无数据可导航", duration=1.0)
         return (app_state, generate_status_html("⚠️ 无数据"), "", "", "<div>无数据</div>", 
                 "<div>无数据</div>", "<div>无数据</div>",
                 gr.update(visible=False), gr.update(visible=False),
-                gr.update(), gr.update(), gr.update(), gr.update())
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                "", "", "<div>无数据</div>", "<div>无数据</div>")
     
     try:
         # Validate index
@@ -805,20 +1037,40 @@ def handle_sample_click(sample_index: int, app_state: Dict[str, Any]) -> Tuple:
             stats_html = generate_stats_html(app_state.get('samples', []))
             
             current_sample = app_state['samples'][app_state['current_index']]
-            phase1_visible = gr.update(visible=(current_sample.status == "unprocessed"))
+            phase1_visible = gr.update(visible=(current_sample.status in ["unprocessed", "discarded"]))
             phase2_visible = gr.update(visible=(current_sample.status == "corrected"))
-            discard_btn_text = "♻️ 取消丢弃此样本" if current_sample.status == "discarded" else "❌ 丢弃此样本"
-            show_phase2_btns = (current_sample.status == "corrected")
+            if current_sample.status == "discarded":
+                discard_btn_update = gr.update(value="♻️ 恢复此样本", elem_classes=["restore-btn"])
+                preview_btn_visible = gr.update(visible=False)
+            else:
+                discard_btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+                preview_btn_visible = gr.update(visible=True)
+            show_phase2_btns = True
             
             return (app_state, status_html, instruction, output, reference_html, sample_list_html, stats_html,
                    phase1_visible, phase2_visible, 
-                   gr.update(value=discard_btn_text),
+                   discard_btn_update,
+                   preview_btn_visible,
                    gr.update(visible=show_phase2_btns),
                    gr.update(visible=show_phase2_btns),
-                   gr.update(visible=show_phase2_btns))
+                   gr.update(visible=show_phase2_btns),
+                   "", "", "<div>无数据</div>", "<div>无数据</div>")
         
         # Update current index
         app_state['current_index'] = sample_index
+        
+        # Check if should load next batch - 当用户点击当前批次的最后1个样本时自动加载
+        if app_state.get('data_manager'):
+            try:
+                data_manager = app_state['data_manager']
+                if data_manager.should_load_next_batch(sample_index):
+                    new_samples = data_manager.load_next_batch()
+                    if new_samples:
+                        app_state['samples'].extend(new_samples)
+                        gr.Info(f"已自动加载 {len(new_samples)} 条数据", duration=1.0)
+            except Exception as e:
+                gr.Warning(f"加载下一批数据失败: {str(e)}", duration=1.0)
+                # Continue anyway
         
         # Load sample to UI
         instruction, output, reference_html, status_html, _, sample_list_html = load_sample_to_ui(app_state)
@@ -826,18 +1078,90 @@ def handle_sample_click(sample_index: int, app_state: Dict[str, Any]) -> Tuple:
         
         # Determine which phase to show based on sample status
         current_sample = app_state['samples'][sample_index]
-        phase1_visible = gr.update(visible=(current_sample.status == "unprocessed"))
-        phase2_visible = gr.update(visible=(current_sample.status == "corrected"))
-        discard_btn_text = "♻️ 取消丢弃此样本" if current_sample.status == "discarded" else "❌ 丢弃此样本"
         
-        # 阶段2的按钮：当状态为corrected时显示
-        show_phase2_btns = (current_sample.status == "corrected")
+        # 已丢弃和未处理的都显示阶段1
+        phase1_visible = gr.update(visible=(current_sample.status in ["unprocessed", "discarded"]))
+        phase2_visible = gr.update(visible=(current_sample.status == "corrected"))
+        
+        # 根据状态设置按钮文本和样式
+        if current_sample.status == "discarded":
+            discard_btn_update = gr.update(value="♻️ 恢复此样本", elem_classes=["restore-btn"])
+            preview_btn_visible = gr.update(visible=False)  # 已丢弃时隐藏预览按钮
+        else:
+            discard_btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+            preview_btn_visible = gr.update(visible=True)   # 未丢弃时显示预览按钮
+        
+        # 阶段2的按钮：当状态为corrected时显示，否则始终显示
+        show_phase2_btns = True
+        # 如果样本状态为corrected，渲染阶段2的内容（使用已存储的edited_*，不重复计算diff）
+        corrected_instruction_text = ""
+        corrected_output_text = ""
+        corrected_instruction_html = "<div>无数据</div>"
+        corrected_output_html = "<div>无数据</div>"
+        
+        if current_sample.status == "corrected":
+            from services import RenderEngine
+            
+            try:
+                render_engine = RenderEngine()
+                
+                # 对于已校正样本，edited_*字段已包含校正结果（带标签），直接使用不重复计算diff
+                # 编辑区使用final_*字段（纯净内容，不含标签）
+                
+                # 获取已存储的edited内容（带标签的校正结果）
+                edited_instruction = current_sample.edited_instruction if current_sample.edited_instruction else ''
+                edited_output = current_sample.edited_output if current_sample.edited_output else ''
+                
+                # 始终从edited_*重新提取final_*，确保编辑区显示正确的纯净内容
+                # 不信任缓存的final_*值，因为可能被污染
+                final_instruction = extract_final_content_from_tags(edited_instruction) if edited_instruction else ''
+                final_output = extract_final_content_from_tags(edited_output) if edited_output else ''
+                
+                # 更新缓存
+                current_sample.final_instruction = final_instruction
+                current_sample.final_output = final_output
+                
+                # 直接使用已存储的edited_*内容渲染（不重复调用diff算法）
+                if edited_instruction:
+                    if has_diff_tags(edited_instruction):
+                        # 包含标签，直接渲染
+                        corrected_instruction_html = render_engine.render_diff_tags(edited_instruction)
+                    else:
+                        # 不包含标签，直接显示（已校正但无变化）
+                        corrected_instruction_html = f'<div class="katex-render-target" data-katex-render="true">{edited_instruction}</div>'
+                else:
+                    corrected_instruction_html = "<div>无校正数据</div>"
+                
+                if edited_output:
+                    if has_diff_tags(edited_output):
+                        corrected_output_html = render_engine.render_diff_tags(edited_output)
+                    else:
+                        corrected_output_html = f'<div class="katex-render-target" data-katex-render="true">{edited_output}</div>'
+                else:
+                    corrected_output_html = "<div>无校正数据</div>"
+                
+                # 编辑区显示纯净内容
+                corrected_instruction_text = final_instruction
+                corrected_output_text = final_output
+                
+            except Exception as e:
+                gr.Warning(f"渲染失败: {str(e)}", duration=2.0)
+                corrected_instruction_html = f"<div>渲染失败: {str(e)}</div>"
+                corrected_output_html = f"<div>渲染失败: {str(e)}</div>"
+                corrected_instruction_text = ""
+                corrected_output_text = ""
         
         return (app_state, status_html, instruction, output, reference_html, sample_list_html, stats_html,
                phase1_visible, phase2_visible,
-               gr.update(value=discard_btn_text),
+               discard_btn_update,
+               preview_btn_visible,
                gr.update(visible=show_phase2_btns),
                gr.update(visible=show_phase2_btns),
+               gr.update(visible=show_phase2_btns),
+               corrected_instruction_text,
+               corrected_output_text,
+               corrected_instruction_html,
+               corrected_output_html,
                gr.update(visible=show_phase2_btns))
         
     except Exception as e:
@@ -846,7 +1170,7 @@ def handle_sample_click(sample_index: int, app_state: Dict[str, Any]) -> Tuple:
         return (app_state, error_status, "", "", "<div>跳转失败</div>", 
                 "<div>无数据</div>", "<div>无数据</div>",
                 gr.update(visible=False), gr.update(visible=False),
-                gr.update(), gr.update(), gr.update(), gr.update())
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
 
 
 def insert_bold_marker(text: str, cursor_pos: int) -> str:
@@ -889,7 +1213,7 @@ def insert_list_marker(text: str, cursor_pos: int) -> str:
     return '\n'.join(lines)
 
 
-def handle_discard_phase1(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str, str, str, str, str]:
+def handle_discard_phase1(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str, str, str, str, Any, Any]:
     """
     Handle discard/undiscard action in Phase 1.
     
@@ -897,12 +1221,15 @@ def handle_discard_phase1(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], st
         app_state: Current application state
     
     Returns:
-        Updated components tuple (app_state, status_html, instruction, output, reference_html, progress_md, sample_list_html, btn_text)
+        Updated components tuple (app_state, status_html, instruction, output, reference_html, 
+                                 progress_md, sample_list_html, btn_update, preview_visible)
     """
     if not app_state.get('samples'):
         gr.Warning("无数据可处理", duration=1.0)
         empty_status = generate_status_html("⚠️ 无数据")
-        return app_state, empty_status, "", "", "<div>无数据</div>", "**进度**: 0 / 0", "<div>无数据</div>", "❌ 丢弃此样本"
+        return (app_state, empty_status, "", "", "<div>无数据</div>", "**进度**: 0 / 0", 
+                "<div>无数据</div>", gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"]), 
+                gr.update(visible=True))
     
     try:
         current_index = app_state['current_index']
@@ -911,11 +1238,12 @@ def handle_discard_phase1(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], st
         total_samples = len(app_state['samples'])
         
         if current_sample.status == "discarded":
-            # 取消丢弃
+            # 恢复样本
             current_sample.status = "unprocessed"
             data_manager.update_sample_status(current_sample.id, "unprocessed")
-            gr.Info("已取消丢弃此样本", duration=1.0)
-            btn_text = "❌ 丢弃此样本"
+            gr.Info("已恢复此样本", duration=1.0)
+            btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+            preview_visible = gr.update(visible=True)
         else:
             # 丢弃
             current_sample.status = "discarded"
@@ -929,18 +1257,25 @@ def handle_discard_phase1(app_state: Dict[str, Any]) -> Tuple[Dict[str, Any], st
                 # 如果是最后一个，跳转到前一个
                 app_state['current_index'] -= 1
             
-            # 根据新样本的状态设置按钮文本
+            # 根据新样本的状态设置按钮文本和样式
             new_current_sample = app_state['samples'][app_state['current_index']]
-            btn_text = "♻️ 取消丢弃此样本" if new_current_sample.status == "discarded" else "❌ 丢弃此样本"
+            if new_current_sample.status == "discarded":
+                btn_update = gr.update(value="♻️ 恢复此样本", elem_classes=["restore-btn"])
+                preview_visible = gr.update(visible=False)
+            else:
+                btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+                preview_visible = gr.update(visible=True)
         
         # 重新加载UI
         instruction, output, reference_html, status_html, progress_md, sample_list_html = load_sample_to_ui(app_state)
-        return app_state, status_html, instruction, output, reference_html, progress_md, sample_list_html, btn_text
+        return app_state, status_html, instruction, output, reference_html, progress_md, sample_list_html, btn_update, preview_visible
         
     except Exception as e:
         gr.Error(f"操作失败: {str(e)}", duration=1.0)
         empty_status = generate_status_html(f"❌ 操作失败: {str(e)}")
-        return app_state, empty_status, "", "", "<div>操作失败</div>", "**进度**: 0 / 0", "<div>无数据</div>", "❌ 丢弃此样本"
+        return (app_state, empty_status, "", "", "<div>操作失败</div>", "**进度**: 0 / 0", 
+                "<div>无数据</div>", gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"]),
+                gr.update(visible=True))
 
 
 def get_stats_html(app_state: Dict[str, Any]) -> str:
@@ -957,3 +1292,173 @@ def get_stats_html(app_state: Dict[str, Any]) -> str:
         return generate_stats_html([])
     return generate_stats_html(app_state['samples'])
 
+
+def handle_backtrack_toggle(app_state: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    切换回溯上传框的显示/隐藏状态。
+    
+    Args:
+        app_state: Current application state
+    
+    Returns:
+        Tuple of (visibility, status_message)
+    """
+    if not app_state.get('data_manager'):
+        gr.Warning("请先上传CSV文件", duration=2.0)
+        return False, "⚠️ 请先上传CSV文件"
+    
+    # 切换显示状态
+    return True, "✅ 请上传已校正数据JSON文件"
+
+
+def handle_backtrack_upload(backtrack_file: str, app_state: Dict[str, Any]) -> Tuple:
+    """
+    处理回溯JSON文件上传。
+    
+    Args:
+        backtrack_file: 上传的JSON文件路径
+        app_state: Current application state
+    
+    Returns:
+        Tuple of 14 values including button states
+    """
+    import json
+    import os
+    
+    if not backtrack_file:
+        gr.Warning("请选择JSON文件", duration=2.0)
+        return (app_state, generate_status_html("⚠️ 请选择JSON文件"), "", "", 
+                "<div>无数据</div>", "<div>无数据</div>", "<div>无数据</div>",
+                True, False, gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    
+    if not app_state.get('data_manager'):
+        gr.Warning("请先上传CSV文件", duration=2.0)
+        return (app_state, generate_status_html("⚠️ 请先上传CSV文件"), "", "", 
+                "<div>无数据</div>", "<div>无数据</div>", "<div>无数据</div>",
+                True, False, gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    
+    try:
+        # 获取当前CSV文件名（不含.csv）
+        data_manager = app_state['data_manager']
+        csv_basename = os.path.splitext(os.path.basename(data_manager.csv_path))[0]
+        
+        # 检查JSON文件名是否包含CSV文件名
+        json_basename = os.path.basename(backtrack_file)
+        if csv_basename not in json_basename:
+            gr.Warning(f"⚠️ 警告：上传的JSON文件名不包含当前CSV文件名'{csv_basename}'，请确保该文件是从当前CSV文件校正导出的！", duration=5.0)
+        
+        # 读取JSON文件
+        with open(backtrack_file, 'r', encoding='utf-8') as f:
+            backtrack_data = json.load(f)
+        
+        if not isinstance(backtrack_data, list):
+            gr.Error("JSON文件格式错误：应为数组格式", duration=2.0)
+            return (app_state, generate_status_html("❌ JSON格式错误"), "", "", 
+                    "<div>格式错误</div>", "<div>无数据</div>", "<div>无数据</div>",
+                    True, False, gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+        
+        # 将JSON数据按sample_id建立索引
+        backtrack_dict = {}
+        for item in backtrack_data:
+            sample_id = item.get('id')
+            if sample_id:
+                backtrack_dict[str(sample_id)] = item
+        
+        # 更新当前样本状态
+        loaded_count = 0
+        export_manager = app_state['export_manager']
+        
+        for sample in app_state['samples']:
+            if str(sample.id) in backtrack_dict:
+                backtrack_item = backtrack_dict[str(sample.id)]
+                
+                # 根据不同格式提取数据
+                raw_instruction = ''
+                raw_output = ''
+                
+                if 'messages' in backtrack_item:
+                    # Messages格式
+                    messages = backtrack_item['messages']
+                    if len(messages) >= 2:
+                        raw_instruction = messages[0].get('content', '')
+                        raw_output = messages[1].get('content', '')
+                elif 'conversations' in backtrack_item:
+                    # ShareGPT格式
+                    convs = backtrack_item['conversations']
+                    if len(convs) >= 2:
+                        raw_instruction = convs[0].get('value', '')
+                        raw_output = convs[1].get('value', '')
+                elif 'instruction' in backtrack_item:
+                    # Alpaca格式
+                    raw_instruction = backtrack_item.get('instruction', '')
+                    raw_output = backtrack_item.get('output', '')
+                elif 'query' in backtrack_item:
+                    # Query-Response格式
+                    raw_instruction = backtrack_item.get('query', '')
+                    raw_output = backtrack_item.get('response', '')
+                
+                # 保存带标记的原始内容到edited字段（用于后续渲染）
+                sample.edited_instruction = raw_instruction
+                sample.edited_output = raw_output
+                
+                # 提取纯净内容到final字段（用于编辑器显示）
+                sample.final_instruction = extract_final_content_from_tags(raw_instruction)
+                sample.final_output = extract_final_content_from_tags(raw_output)
+                
+                # 更新状态为已校正
+                sample.status = 'corrected'
+                data_manager.update_sample_status(sample.id, 'corrected')
+                
+                # 添加到导出队列
+                export_manager.add_sample(sample)
+                loaded_count += 1
+        
+        # 找到第一个未处理的样本
+        first_unprocessed = None
+        for idx, sample in enumerate(app_state['samples']):
+            if sample.status == 'unprocessed':
+                first_unprocessed = idx
+                break
+        
+        # 跳转到第一个未处理的样本，如果没有则保持当前位置
+        if first_unprocessed is not None:
+            app_state['current_index'] = first_unprocessed
+        
+        # 加载UI
+        instruction, output, reference_html, status_html, progress_md, sample_list_html = load_sample_to_ui(app_state)
+        
+        # 根据当前样本状态决定显示哪个阶段
+        current_sample = app_state['samples'][app_state['current_index']]
+        phase1_visible = current_sample.status in ["unprocessed", "discarded"]
+        phase2_visible = current_sample.status == "corrected"
+        
+        # 根据状态设置按钮
+        if current_sample.status == "discarded":
+            discard_btn_update = gr.update(value="♻️ 恢复此样本", elem_classes=["restore-btn"])
+            preview_btn_visible = gr.update(visible=False)  # 已丢弃时隐藏预览按钮
+        else:
+            discard_btn_update = gr.update(value="❌ 丢弃此样本", elem_classes=["danger-btn"])
+            preview_btn_visible = gr.update(visible=True)
+        
+        show_phase2_btns = True
+        
+        gr.Info(f"成功加载 {loaded_count} 条已校正数据", duration=3.0)
+        return (app_state, status_html, instruction, output, reference_html, sample_list_html, 
+                generate_stats_html(app_state['samples']),
+                phase1_visible, phase2_visible,
+                discard_btn_update,
+                preview_btn_visible,
+                gr.update(visible=show_phase2_btns),
+                gr.update(visible=show_phase2_btns),
+                gr.update(visible=show_phase2_btns))
+        
+    except json.JSONDecodeError as e:
+        gr.Error(f"JSON文件解析失败: {str(e)}", duration=2.0)
+        return (app_state, generate_status_html(f"❌ JSON解析失败"), "", "", 
+                "<div>解析失败</div>", "<div>无数据</div>", "<div>无数据</div>",
+                True, False, gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    except Exception as e:
+        gr.Error(f"回溯加载失败: {str(e)}", duration=2.0)
+        return (app_state, generate_status_html(f"❌ 回溯失败: {str(e)}"), "", "", 
+                "<div>加载失败</div>", "<div>无数据</div>", "<div>无数据</div>",
+                True, False, gr.update(), gr.update(), gr.update(), gr.update(), gr.update())

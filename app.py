@@ -36,6 +36,8 @@ def main():
         theme=gr.themes.Soft(),
         head=render_engine.get_katex_header(),
         css="""
+        /* 全局缩放85% */
+        .gradio-container { zoom: 0.85; transform-origin: top center; }
         /* 全局字体设置 - 英文使用Times New Roman */
         * { font-family: "Times New Roman", "SimSun", "宋体", serif !important; }
         .gradio-container { font-size: 18px !important; font-family: "Times New Roman", "SimSun", "宋体", serif !important; }
@@ -110,13 +112,8 @@ def main():
         
         # Navigation Handlers
         def on_navigation(direction, state):
-            from ui.event_handlers import get_stats_html
-            state, status_html, instruction, output, ref_html, progress, sample_list = handle_navigation(direction, state)
-            stats_html = get_stats_html(state)
-            return (
-                state, status_html, instruction, output, ref_html, sample_list, stats_html,
-                gr.update(visible=True), gr.update(visible=False)
-            )
+            # handle_navigation now returns 18 values including phase2 components
+            return handle_navigation(direction, state)
         
         components['prev_btn'].click(
             fn=lambda state: on_navigation("prev", state),
@@ -130,7 +127,16 @@ def main():
                 components['sample_list'],
                 components['stats_display'],
                 components['phase1_group'],
-                components['phase2_group']
+                components['phase2_group'],
+                components['discard_phase1_btn'],
+                components['generate_preview_btn'],
+                components['discard_btn'],
+                components['submit_btn'],
+                components['refresh_btn'],
+                components['corrected_instruction_editor'],
+                components['corrected_output_editor'],
+                components['corrected_instruction_display'],
+                components['corrected_output_display']
             ]
         )
         
@@ -146,7 +152,16 @@ def main():
                 components['sample_list'],
                 components['stats_display'],
                 components['phase1_group'],
-                components['phase2_group']
+                components['phase2_group'],
+                components['discard_phase1_btn'],
+                components['generate_preview_btn'],
+                components['discard_btn'],
+                components['submit_btn'],
+                components['refresh_btn'],
+                components['corrected_instruction_editor'],
+                components['corrected_output_editor'],
+                components['corrected_instruction_display'],
+                components['corrected_output_display']
             ]
         )
         
@@ -165,73 +180,33 @@ def main():
                 components['phase1_group'],
                 components['phase2_group'],
                 components['discard_phase1_btn'],
+                components['generate_preview_btn'],
                 components['discard_btn'],
                 components['submit_btn'],
-                components['refresh_btn']
+                components['refresh_btn'],
+                components['corrected_instruction_editor'],
+                components['corrected_output_editor'],
+                components['corrected_instruction_display'],
+                components['corrected_output_display']
             ]
         )
         
         # Generate Preview Handler
         def on_generate_preview(instruction, output, state):
-            from services import DiffEngine, RenderEngine
+            from ui.event_handlers import handle_generate_preview
             
-            if not state.get('samples'):
-                gr.Warning("无数据可处理",    duration=2.0)
-                no_data_html = '<div>无数据</div>'
-                return (
-                    state, 
-                    instruction,
-                    output,
-                    no_data_html,
-                    no_data_html,
-                    gr.update(visible=True), 
-                    gr.update(visible=False)
-                )
+            # handle_generate_preview returns: (app_state, instruction_diff_html, instruction_text, output_diff_html, output_text, phase1_visible, phase2_visible)
+            state, instruction_diff_html, instruction_text, output_diff_html, output_text, phase1_vis, phase2_vis = handle_generate_preview(instruction, output, state)
             
-            try:
-                current_sample = state['samples'][state['current_index']]
-                
-                # 计算差异
-                diff_engine = DiffEngine()
-                render_engine = RenderEngine()
-                
-                # 计算问题差异
-                instruction_diff = diff_engine.compute_diff(current_sample.instruction, instruction)
-                instruction_diff_html = render_engine.render_diff_tags(instruction_diff)
-                
-                # 计算回答差异
-                output_diff = diff_engine.compute_diff(current_sample.output, output)
-                output_diff_html = render_engine.render_diff_tags(output_diff)
-                
-                # 存储编辑内容
-                current_sample.edited_instruction = instruction
-                current_sample.edited_output = output
-                
-                # 更新阶段
-                state['phase'] = 2
-                
-                return (
-                    state,
-                    instruction,  # 在阶段2显示编辑后的内容
-                    output,
-                    instruction_diff_html,  # 问题差异HTML
-                    output_diff_html,       # 回答差异HTML
-                    gr.update(visible=False),
-                    gr.update(visible=True)
-                )
-                
-            except Exception as e:
-                gr.Error(f"生成预览失败: {str(e)}",    duration=2.0)
-                error_html = f'<div style="color: red;">生成预览失败: {str(e)}</div>'
-                return (
-                    state,
-                    instruction,
-                    output,
-                    error_html,
-                    error_html,
-                    gr.update(visible=True),
-                    gr.update(visible=False)
-                )
+            return (
+                state,
+                instruction_text,  # 编辑器显示纯净内容
+                output_text,      # 编辑器显示纯净内容
+                instruction_diff_html,  # 差异显示
+                output_diff_html,       # 差异显示
+                gr.update(visible=phase1_vis),
+                gr.update(visible=phase2_vis)
+            )
         
         components['generate_preview_btn'].click(
             fn=on_generate_preview,
@@ -321,11 +296,11 @@ def main():
         # Discard Phase 1 Handler
         def on_discard_phase1(state):
             from ui.event_handlers import handle_discard_phase1, get_stats_html
-            state, status_html, instruction, output, reference, progress, sample_list, btn_text = handle_discard_phase1(state)
+            state, status_html, instruction, output, reference, progress, sample_list, btn_update, preview_visible = handle_discard_phase1(state)
             stats_html = get_stats_html(state)
             return (
                 state, status_html, instruction, output, reference, sample_list, stats_html,
-                gr.update(visible=True), gr.update(visible=False), gr.update(value=btn_text)
+                gr.update(visible=True), gr.update(visible=False), btn_update, preview_visible
             )
         
         components['discard_phase1_btn'].click(
@@ -341,7 +316,8 @@ def main():
                 components['stats_display'],
                 components['phase1_group'],
                 components['phase2_group'],
-                components['discard_phase1_btn']
+                components['discard_phase1_btn'],
+                components['generate_preview_btn']
             ]
         )
         
@@ -360,14 +336,19 @@ def main():
             render_engine = RenderEngine()
             
             try:
-                # 使用当前编辑框中的内容重新计算差异
+                # 先清理编辑器内容中可能存在的标记（防止标记嵌套）
+                from ui.event_handlers import extract_final_content_from_tags
+                clean_instruction = extract_final_content_from_tags(corrected_instruction)
+                clean_output = extract_final_content_from_tags(corrected_output)
+                
+                # 使用清理后的内容计算差异
                 instruction_diff = diff_engine.compute_diff(
                     current_sample.instruction, 
-                    corrected_instruction
+                    clean_instruction
                 )
                 output_diff = diff_engine.compute_diff(
                     current_sample.output, 
-                    corrected_output
+                    clean_output
                 )
                 
                 # 渲染差异
@@ -375,10 +356,15 @@ def main():
                 output_html = render_engine.render_diff_tags(output_diff)
                 
                 # 更新存储的编辑内容
-                current_sample.edited_instruction = corrected_instruction
-                current_sample.edited_output = corrected_output
+                # edited_* 存储带标记的差异结果（用于导出）
+                current_sample.edited_instruction = instruction_diff
+                current_sample.edited_output = output_diff
+                # final_* 存储纯净内容（用于编辑器显示）
+                current_sample.final_instruction = clean_instruction
+                current_sample.final_output = clean_output
                 
-                return corrected_instruction, corrected_output, instruction_html, output_html
+                # 返回清理后的内容给编辑器
+                return clean_instruction, clean_output, instruction_html, output_html
                     
             except Exception as e:
                 error_msg = f'<div style="color: red;">刷新失败: {str(e)}</div>'
@@ -456,6 +442,51 @@ def main():
             outputs=[app_state]
         )
         
+        # Backtrack Toggle Handler
+        def on_backtrack_toggle(state):
+            from ui.event_handlers import handle_backtrack_toggle
+            visible, msg = handle_backtrack_toggle(state)
+            return gr.update(visible=visible)
+        
+        components['backtrack_btn'].click(
+            fn=on_backtrack_toggle,
+            inputs=[app_state],
+            outputs=[components['backtrack_upload']]
+        )
+        
+        # Backtrack Upload Handler
+        def on_backtrack_upload(file_path, state):
+            from ui.event_handlers import handle_backtrack_upload
+            result = handle_backtrack_upload(file_path, state)
+            # handle_backtrack_upload returns 14 values
+            state, status_html, instruction, output, ref_html, sample_list, stats_html, phase1_vis, phase2_vis, discard_btn, preview_btn, discard_btn2, submit_btn, refresh_btn = result
+            return (
+                state, status_html, instruction, output, ref_html, sample_list, stats_html,
+                gr.update(visible=phase1_vis), gr.update(visible=phase2_vis),
+                discard_btn, preview_btn, discard_btn2, submit_btn, refresh_btn
+            )
+        
+        components['backtrack_upload'].upload(
+            fn=on_backtrack_upload,
+            inputs=[components['backtrack_upload'], app_state],
+            outputs=[
+                app_state,
+                components['upload_status'],
+                components['instruction_editor'],
+                components['output_editor'],
+                components['reference_display'],
+                components['sample_list'],
+                components['stats_display'],
+                components['phase1_group'],
+                components['phase2_group'],
+                components['discard_phase1_btn'],
+                components['generate_preview_btn'],
+                components['discard_btn'],
+                components['submit_btn'],
+                components['refresh_btn']
+            ]
+        )
+        
         # Collapse/Expand Navigation Handlers
         def on_collapse():
             return (
@@ -475,7 +506,8 @@ def main():
             outputs=[
                 components['left_col'],
                 components['standalone_expand_btn']
-            ]
+            ],
+            show_progress=False
         )
         
         # 两个展开按钮都绑定同一个函数

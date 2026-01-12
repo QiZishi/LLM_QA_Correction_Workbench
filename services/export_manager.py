@@ -44,6 +44,7 @@ class ExportManager:
     def add_sample(self, sample: Sample):
         """
         Add a corrected sample to the export queue.
+        根据sample.id进行去重，确保每个id只添加一次。
         
         Args:
             sample: Sample object to add
@@ -57,7 +58,19 @@ class ExportManager:
                 f"Sample {sample.id} has status: {sample.status}"
             )
         
-        self.corrected_samples.append(sample)
+        # 检查是否已存在相同id的样本，如果存在则替换（保留最新的）
+        existing_index = None
+        for i, existing_sample in enumerate(self.corrected_samples):
+            if existing_sample.id == sample.id:
+                existing_index = i
+                break
+        
+        if existing_index is not None:
+            # 替换已存在的样本
+            self.corrected_samples[existing_index] = sample
+        else:
+            # 添加新样本
+            self.corrected_samples.append(sample)
     
     def export_to_json(self, original_filename: str) -> str:
         """
@@ -133,11 +146,11 @@ class ExportManager:
             "messages": [
                 {
                     "role": "user",
-                    "content": sample.final_instruction or sample.edited_instruction or sample.instruction
+                    "content": sample.edited_instruction or sample.final_instruction or sample.instruction
                 },
                 {
                     "role": "assistant",
-                    "content": sample.final_output or sample.edited_output or sample.output
+                    "content": sample.edited_output or sample.final_output or sample.output
                 }
             ],
             "origin_chunk": sample.chunk,
@@ -163,9 +176,9 @@ class ExportManager:
             Dictionary in Alpaca format
         """
         return {
-            "instruction": sample.final_instruction or sample.edited_instruction or sample.instruction,
+            "instruction": sample.edited_instruction or sample.final_instruction or sample.instruction,
             "input": "",
-            "output": sample.final_output or sample.edited_output or sample.output,
+            "output": sample.edited_output or sample.final_output or sample.output,
             "id": sample.id
         }
     
@@ -192,11 +205,11 @@ class ExportManager:
             "conversations": [
                 {
                     "from": "human",
-                    "value": sample.final_instruction or sample.edited_instruction or sample.instruction
+                    "value": sample.edited_instruction or sample.final_instruction or sample.instruction
                 },
                 {
                     "from": "gpt",
-                    "value": sample.final_output or sample.edited_output or sample.output
+                    "value": sample.edited_output or sample.final_output or sample.output
                 }
             ],
             "id": sample.id
@@ -220,8 +233,8 @@ class ExportManager:
             Dictionary in Query-Response format
         """
         return {
-            "query": sample.final_instruction or sample.edited_instruction or sample.instruction,
-            "response": sample.final_output or sample.edited_output or sample.output,
+            "query": sample.edited_instruction or sample.final_instruction or sample.instruction,
+            "response": sample.edited_output or sample.final_output or sample.output,
             "id": sample.id
         }
     

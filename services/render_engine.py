@@ -103,6 +103,9 @@ class RenderEngine:
         """
         恢复 LaTeX 公式，直接输出$...$格式供KaTeX渲染
         不需要额外的span包装，KaTeX会自动处理
+        
+        ⚠️ 关键修复：LaTeX公式周围的HTML实体需要保持转义状态
+        但公式内部的内容不需要额外处理，KaTeX会正确渲染
         """
         result = html_text
         
@@ -325,10 +328,10 @@ class RenderEngine:
         此方法生成KaTeX所需的CSS和JavaScript
         
         ⚠️ 重要注意事项：
-        1. script标签不能使用defer属性（会导致加载顺序错误）
-        2. 必须保持当前的加载顺序：katex.min.js → auto-render.min.js → 自定义JS
-        3. renderAllMath函数通过data-katex-render属性查找需要渲染的元素
-        4. 每秒自动检查并渲染新增的LaTeX内容
+        1. 使用onload回调确保加载顺序正确
+        2. 使用cdnjs.cloudflare.com作为主CDN（更稳定）
+        3. 添加错误处理和回退机制
+        4. renderAllMath函数通过data-katex-render属性查找需要渲染的元素
         
         Returns:
             HTML string with KaTeX CDN links and auto-render configuration
@@ -338,26 +341,119 @@ class RenderEngine:
         # 添加随机数+时间戳来强制浏览器每次都重新加载
         cache_buster = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
         
-        # ========== 关键：不使用defer，确保同步加载 ==========
-        # 使用unpkg CDN替代jsDelivr，在中国更稳定
+        # ========== 使用多CDN备用策略，确保加载成功 ==========
+        # 使用onload确保加载顺序：katex.min.js -> auto-render.min.js -> 自定义JS
         header = '''
-        <link rel="stylesheet" href="https://unpkg.com/katex@0.16.9/dist/katex.min.css?v=''' + cache_buster + '''">
-        <script src="https://unpkg.com/katex@0.16.9/dist/katex.min.js?v=''' + cache_buster + '''"></script>
-        <script src="https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js?v=''' + cache_buster + '''"></script>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
         <script>
-        /* ========== 关键函数：等待KaTeX加载 ========== */
-        // 等待KaTeX加载完成
-        function waitForKaTeX(callback) {
-            if (typeof renderMathInElement !== 'undefined') {
-                callback();
-            } else {
-                setTimeout(function() { waitForKaTeX(callback); }, 100);
+        // 全局变量用于跟踪加载状态
+        window.katexLoaded = false;
+        window.autoRenderLoaded = false;
+        window.katexLoadAttempts = 0;
+        window.maxLoadAttempts = 3;
+        
+        // CDN列表（优先顺序）
+        window.cdnList = [
+            {
+                css: 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css',
+                js: 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
+                autoRender: 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js'
+            },
+            {
+                css: 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css',
+                js: 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js',
+                autoRender: 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js'
+            }
+        ];
+        window.currentCDN = 0;
+        </script>
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous" onload="window.katexLoaded = true; console.log('✅ KaTeX core loaded'); tryLoadAutoRender();" onerror="handleKatexLoadError();"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05" crossorigin="anonymous" onload="window.autoRenderLoaded = true; console.log('✅ KaTeX auto-render loaded'); initKaTeX();" onerror="handleAutoRenderLoadError();"></script>
+        <script>
+        /* ========== CDN加载错误处理 ========== */
+        function handleKatexLoadError() {
+            console.error('❌ KaTeX核心库加载失败');
+            window.katexLoadAttempts++;
+            if (window.katexLoadAttempts < window.maxLoadAttempts) {
+                console.log('🔄 尝试备用CDN...');
+                setTimeout(function() {
+                    loadKatexFromBackupCDN();
+                }, 1000);
             }
         }
         
-        // 立即开始等待并渲染
-        waitForKaTeX(function() {
-            console.log("✅ KaTeX loaded successfully");
+        function handleAutoRenderLoadError() {
+            console.error('❌ KaTeX auto-render加载失败');
+            window.katexLoadAttempts++;
+            if (window.katexLoadAttempts < window.maxLoadAttempts) {
+                console.log('🔄 尝试备用CDN...');
+                setTimeout(function() {
+                    loadAutoRenderFromBackupCDN();
+                }, 1000);
+            }
+        }
+        
+        function loadKatexFromBackupCDN() {
+            if (window.currentCDN < window.cdnList.length - 1) {
+                window.currentCDN++;
+                var cdn = window.cdnList[window.currentCDN];
+                var script = document.createElement('script');
+                script.src = cdn.js;
+                script.onload = function() {
+                    window.katexLoaded = true;
+                    console.log('✅ KaTeX核心库从备用CDN加载成功');
+                    tryLoadAutoRender();
+                };
+                script.onerror = handleKatexLoadError;
+                document.head.appendChild(script);
+            }
+        }
+        
+        function loadAutoRenderFromBackupCDN() {
+            if (window.currentCDN < window.cdnList.length - 1) {
+                window.currentCDN++;
+                var cdn = window.cdnList[window.currentCDN];
+                var script = document.createElement('script');
+                script.src = cdn.autoRender;
+                script.onload = function() {
+                    window.autoRenderLoaded = true;
+                    console.log('✅ KaTeX auto-render从备用CDN加载成功');
+                    initKaTeX();
+                };
+                script.onerror = handleAutoRenderLoadError;
+                document.head.appendChild(script);
+            }
+        }
+        
+        function tryLoadAutoRender() {
+            // KaTeX核心已加载，确保auto-render也加载
+            if (!window.autoRenderLoaded) {
+                setTimeout(function() {
+                    if (!window.autoRenderLoaded) {
+                        console.warn('⚠️ auto-render未加载，可能需要手动加载');
+                    }
+                }, 2000);
+            }
+        }
+        </script>
+        <script>
+        /* ========== 关键函数：初始化KaTeX渲染 ========== */
+        function initKaTeX() {
+            console.log("🚀 初始化KaTeX渲染系统");
+            
+            // 确保两个库都已加载
+            if (!window.katexLoaded || !window.autoRenderLoaded) {
+                console.warn("⚠️ KaTeX库未完全加载，1秒后重试");
+                setTimeout(initKaTeX, 1000);
+                return;
+            }
+            
+            if (typeof renderMathInElement === 'undefined') {
+                console.error("❌ renderMathInElement未定义");
+                return;
+            }
+            
+            console.log("✅ KaTeX库已完全加载");
             
             // 立即渲染一次
             renderAllMath();
@@ -370,36 +466,19 @@ class RenderEngine:
             
             // 然后每秒检查一次
             setInterval(renderAllMath, 1000);
-        });
-        
-        // 多种加载事件监听
-        if (document.readyState === 'loading') {
-            document.addEventListener("DOMContentLoaded", function() {
-                console.log("📄 DOMContentLoaded triggered");
-                waitForKaTeX(function() {
-                    setTimeout(renderAllMath, 100);
-                });
-            });
-        } else {
-            // 文档已经加载完成
-            console.log("📄 Document already loaded");
-            waitForKaTeX(function() {
-                renderAllMath();
-            });
+            
+            // 启动DOM监听
+            startDOMObserver();
         }
         
-        // load事件
-        window.addEventListener('load', function() {
-            console.log("🌐 Window loaded");
-            waitForKaTeX(function() {
-                setTimeout(renderAllMath, 100);
-            });
-        });
-        
-        // 监听所有可能的DOM变化
-        waitForKaTeX(function() {
+        /* ========== DOM变化监听 ========== */
+        function startDOMObserver() {
+            if (typeof MutationObserver === 'undefined') {
+                console.warn("⚠️ MutationObserver不可用");
+                return;
+            }
+            
             const observer = new MutationObserver(function(mutations) {
-                // 只要DOM有变化就尝试渲染
                 setTimeout(renderAllMath, 50);
             });
             
@@ -415,6 +494,29 @@ class RenderEngine:
                     console.log("👁️ DOM监听已启动");
                 }
             }, 200);
+        }
+        
+        /* ========== 多种加载事件监听 ========== */
+        if (document.readyState === 'loading') {
+            document.addEventListener("DOMContentLoaded", function() {
+                console.log("📄 DOMContentLoaded triggered");
+                setTimeout(function() {
+                    if (window.autoRenderLoaded) {
+                        renderAllMath();
+                    }
+                }, 100);
+            });
+        } else {
+            console.log("📄 Document already loaded");
+        }
+        
+        window.addEventListener('load', function() {
+            console.log("🌐 Window loaded");
+            setTimeout(function() {
+                if (window.autoRenderLoaded) {
+                    renderAllMath();
+                }
+            }, 100);
         });
         
         /* ========== 关键函数：渲染所有LaTeX公式 ========== */
