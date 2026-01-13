@@ -1,7 +1,3 @@
----
-license: Apache License 2.0
----
-
 # 🎯 大模型问答数据校正工作台
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
