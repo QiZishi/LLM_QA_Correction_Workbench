@@ -341,104 +341,128 @@ class RenderEngine:
         # 添加随机数+时间戳来强制浏览器每次都重新加载
         cache_buster = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
         
-        # ========== 使用稳定的CDN，移除可能导致加载失败的属性 ==========
-        # 不使用 defer/integrity，确保脚本按顺序同步加载
+        # ========== 手动控制加载顺序，避免竞态条件 ==========
+        # 先加载CSS，然后按顺序加载JS
         header = '''
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
         <script>
-        // 全局变量用于跟踪加载状态
-        window.katexLoaded = false;
-        window.autoRenderLoaded = false;
-        window.katexRetryCount = 0;
-        </script>
-        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous" onload="window.katexLoaded = true; console.log('✅ KaTeX 核心已加载'); checkAndInit();" onerror="console.error('❌ KaTeX 核心加载失败'); loadKatexFallback();"></script>
-        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="window.autoRenderLoaded = true; console.log('✅ KaTeX auto-render 已加载'); checkAndInit();" onerror="console.error('❌ auto-render 加载失败'); loadAutoRenderFallback();"></script>
-        <script>
-        /* ========== 备用CDN加载 ========== */
-        function loadKatexFallback() {
-            if (window.katexRetryCount < 1) {
-                window.katexRetryCount++;
-                console.log('🔄 尝试备用CDN（cdnjs）...');
-                var script = document.createElement('script');
-                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js';
-                script.onload = function() {
-                    window.katexLoaded = true;
-                    console.log('✅ KaTeX 从备用CDN加载成功');
-                    checkAndInit();
+        // 手动顺序加载 KaTeX 库
+        (function() {
+            console.log("🔧 开始加载 KaTeX 库...");
+            
+            // 第一步：加载 KaTeX 核心
+            var katexScript = document.createElement('script');
+            katexScript.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';
+            katexScript.onload = function() {
+                console.log("✅ KaTeX 核心加载成功");
+                console.log("   window.katex:", typeof window.katex);
+                console.log("   katex.render:", typeof window.katex.render);
+                
+                // 验证 KaTeX 对象已正确初始化
+                if (typeof window.katex === 'undefined') {
+                    console.error("❌ window.katex 未定义");
+                    tryBackupCDN();
+                    return;
+                }
+                
+                // 第二步：加载 auto-render
+                loadAutoRender();
+            };
+            katexScript.onerror = function() {
+                console.error("❌ KaTeX 核心加载失败，尝试备用CDN");
+                tryBackupCDN();
+            };
+            document.head.appendChild(katexScript);
+            
+            function loadAutoRender() {
+                console.log("🔧 开始加载 auto-render...");
+                var autoRenderScript = document.createElement('script');
+                autoRenderScript.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js';
+                autoRenderScript.onload = function() {
+                    console.log("✅ auto-render 加载成功");
+                    console.log("   renderMathInElement:", typeof renderMathInElement);
+                    
+                    // 验证函数已定义
+                    if (typeof renderMathInElement === 'undefined') {
+                        console.error("❌ renderMathInElement 未定义");
+                        return;
+                    }
+                    
+                    // 第三步：初始化渲染
+                    initKaTeXRendering();
                 };
-                script.onerror = function() {
-                    console.error('❌ 备用CDN也失败');
+                autoRenderScript.onerror = function() {
+                    console.error("❌ auto-render 加载失败");
                 };
-                document.head.appendChild(script);
+                document.head.appendChild(autoRenderScript);
             }
-        }
-        
-        function loadAutoRenderFallback() {
-            if (window.katexRetryCount < 1) {
-                window.katexRetryCount++;
-                console.log('🔄 尝试备用CDN（cdnjs）...');
-                var script = document.createElement('script');
-                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js';
-                script.onload = function() {
-                    window.autoRenderLoaded = true;
-                    console.log('✅ auto-render 从备用CDN加载成功');
-                    checkAndInit();
+            
+            function tryBackupCDN() {
+                console.log("🔄 尝试备用 CDN (cdnjs)...");
+                var backupScript = document.createElement('script');
+                backupScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js';
+                backupScript.onload = function() {
+                    console.log("✅ 从备用CDN加载成功");
+                    if (typeof window.katex !== 'undefined') {
+                        loadAutoRenderBackup();
+                    }
                 };
-                script.onerror = function() {
-                    console.error('❌ 备用CDN也失败');
+                backupScript.onerror = function() {
+                    console.error("❌ 备用CDN也失败");
                 };
-                document.head.appendChild(script);
+                document.head.appendChild(backupScript);
             }
-        }
-        
-        function checkAndInit() {
-            if (window.katexLoaded && window.autoRenderLoaded && typeof renderMathInElement !== 'undefined') {
-                console.log('✅ 所有库已加载，开始初始化');
-                initKaTeX();
-            } else {
-                console.log('⏳ 等待所有库加载... katex:', window.katexLoaded, 'autoRender:', window.autoRenderLoaded, 'renderMathInElement:', typeof renderMathInElement !== 'undefined');
+            
+            function loadAutoRenderBackup() {
+                var backupAutoRender = document.createElement('script');
+                backupAutoRender.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js';
+                backupAutoRender.onload = function() {
+                    if (typeof renderMathInElement !== 'undefined') {
+                        initKaTeXRendering();
+                    }
+                };
+                document.head.appendChild(backupAutoRender);
             }
-        }
+        })();
         </script>
         <script>
         /* ========== 关键函数：初始化KaTeX渲染 ========== */
-        function initKaTeX() {
+        function initKaTeXRendering() {
             console.log("🚀 初始化KaTeX渲染系统");
             
+            // 严格检查所有必需的对象和函数
+            if (typeof window.katex === 'undefined') {
+                console.error("❌ window.katex 未定义，无法初始化");
+                return;
+            }
+            
+            if (typeof window.katex.render === 'undefined') {
+                console.error("❌ window.katex.render 未定义");
+                return;
+            }
+            
+            if (typeof renderMathInElement === 'undefined') {
+                console.error("❌ renderMathInElement 未定义");
+                return;
+            }
+            
             // 检查是否已初始化
-            if (window.katexInitialized) {
-                console.log("⚠️ KaTeX已初始化，跳过");
+            if (window.katexRenderingInitialized) {
+                console.log("⚠️ KaTeX渲染已初始化，跳过");
                 return;
             }
             
-            // 确保库已加载
-            if (typeof window.katex === 'undefined' || typeof renderMathInElement === 'undefined') {
-                console.error("❌ KaTeX库未完全加载");
-                console.log("  katex:", typeof window.katex);
-                console.log("  renderMathInElement:", typeof renderMathInElement);
-                // 1秒后重试
-                setTimeout(function() {
-                    if (typeof renderMathInElement !== 'undefined') {
-                        initKaTeX();
-                    }
-                }, 1000);
-                return;
-            }
+            window.katexRenderingInitialized = true;
+            console.log("✅ 所有检查通过，开始渲染LaTeX");
             
-            console.log("✅ KaTeX库已完全加载，开始初始化渲染");
-            window.katexInitialized = true;
+            // 延迟渲染，确保DOM已准备好
+            setTimeout(renderAllMathSafe, 300);
+            setTimeout(renderAllMathSafe, 800);
+            setTimeout(renderAllMathSafe, 1500);
+            setTimeout(renderAllMathSafe, 3000);
             
-            // 立即渲染一次
-            renderAllMath();
-            
-            // 多次渲染确保捕获动态内容
-            setTimeout(renderAllMath, 200);
-            setTimeout(renderAllMath, 500);
-            setTimeout(renderAllMath, 1000);
-            setTimeout(renderAllMath, 2000);
-            
-            // 定期检查
-            setInterval(renderAllMath, 2000);
+            // 定期检查并渲染
+            setInterval(renderAllMathSafe, 3000);
             
             // 启动DOM监听
             startDOMObserver();
@@ -461,7 +485,7 @@ class RenderEngine:
             const observer = new MutationObserver(function(mutations) {
                 // 防抖：避免过于频繁触发
                 clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(renderAllMath, 100);
+                debounceTimer = setTimeout(renderAllMathSafe, 200);
             });
             
             // 延迟启动observer确保body存在
@@ -475,7 +499,25 @@ class RenderEngine:
                     });
                     console.log("👁️ DOM监听已启动");
                 }
-            }, 500);
+            }, 1000);
+        }
+        
+        /* ========== 安全的渲染函数（带完整错误检查） ========== */
+        function renderAllMathSafe() {
+            // 每次调用前都验证
+            if (typeof window.katex === 'undefined') {
+                return; // 静默失败
+            }
+            
+            if (typeof renderMathInElement === 'undefined') {
+                return; // 静默失败
+            }
+            
+            try {
+                renderAllMath();
+            } catch (e) {
+                console.error("❌ 渲染过程出错:", e);
+            }
         }
         
         /* ========== 多种加载事件监听 ========== */
