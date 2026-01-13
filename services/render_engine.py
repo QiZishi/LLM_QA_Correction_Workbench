@@ -327,142 +327,216 @@ class RenderEngine:
         ========== 关键方法：KaTeX LaTeX渲染配置 ==========
         此方法生成KaTeX所需的CSS和JavaScript
         
-        ⚠️ ModelScope环境优化：
-        1. 使用国内可访问的CDN源
-        2. 移除所有可能被CSP阻止的属性
-        3. 使用完整的错误降级方案
+        ⚠️ 重要注意事项：
+        1. 使用onload回调确保加载顺序正确
+        2. 使用cdnjs.cloudflare.com作为主CDN（更稳定）
+        3. 添加错误处理和回退机制
+        4. renderAllMath函数通过data-katex-render属性查找需要渲染的元素
         
         Returns:
             HTML string with KaTeX CDN links and auto-render configuration
         """
+        import time
+        import random
+        # 添加随机数+时间戳来强制浏览器每次都重新加载
+        cache_buster = str(int(time.time() * 1000)) + str(random.randint(1000, 9999))
         
-        # ========== 使用国内稳定CDN，完全兼容ModelScope ==========
+        # ========== 使用稳定的CDN，移除可能导致加载失败的属性 ==========
+        # 不使用 defer/integrity，确保脚本按顺序同步加载
         header = '''
-        <!-- KaTeX CSS -->
-        <link rel="stylesheet" href="https://lib.baomitu.com/KaTeX/0.16.9/katex.min.css">
-        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous">
         <script>
-        // 初始化全局状态
-        window.katexStatus = {
-            loaded: false,
-            autoRenderLoaded: false,
-            initialized: false,
-            renderCount: 0
-        };
+        // 全局变量用于跟踪加载状态
+        window.katexLoaded = false;
+        window.autoRenderLoaded = false;
+        window.katexRetryCount = 0;
         </script>
-        
-        <!-- KaTeX 核心库 -->
-        <script src="https://lib.baomitu.com/KaTeX/0.16.9/katex.min.js" onload="window.katexStatus.loaded = true; console.log('✅ KaTeX loaded from baomitu'); tryInitKaTeX();" onerror="loadKatexBackup();"></script>
-        
-        <!-- KaTeX Auto-render -->
-        <script src="https://lib.baomitu.com/KaTeX/0.16.9/contrib/auto-render.min.js" onload="window.katexStatus.autoRenderLoaded = true; console.log('✅ auto-render loaded'); tryInitKaTeX();" onerror="loadAutoRenderBackup();"></script>
-        
+        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous" onload="window.katexLoaded = true; console.log('✅ KaTeX 核心已加载'); checkAndInit();" onerror="console.error('❌ KaTeX 核心加载失败'); loadKatexFallback();"></script>
+        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="window.autoRenderLoaded = true; console.log('✅ KaTeX auto-render 已加载'); checkAndInit();" onerror="console.error('❌ auto-render 加载失败'); loadAutoRenderFallback();"></script>
         <script>
-        // 备用CDN加载函数
-        function loadKatexBackup() {
-            console.warn('⚠️ baomitu CDN失败，尝试unpkg...');
-            var script = document.createElement('script');
-            script.src = 'https://unpkg.com/katex@0.16.9/dist/katex.min.js';
-            script.onload = function() {
-                window.katexStatus.loaded = true;
-                console.log('✅ KaTeX loaded from unpkg');
-                tryInitKaTeX();
-            };
-            script.onerror = function() {
-                console.error('❌ 所有KaTeX CDN均失败');
-            };
-            document.head.appendChild(script);
-        }
-        
-        function loadAutoRenderBackup() {
-            console.warn('⚠️ baomitu auto-render失败，尝试unpkg...');
-            var script = document.createElement('script');
-            script.src = 'https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js';
-            script.onload = function() {
-                window.katexStatus.autoRenderLoaded = true;
-                console.log('✅ auto-render loaded from unpkg');
-                tryInitKaTeX();
-            };
-            script.onerror = function() {
-                console.error('❌ 所有auto-render CDN均失败');
-            };
-            document.head.appendChild(script);
-        }
-        
-        // 尝试初始化KaTeX
-        function tryInitKaTeX() {
-            if (window.katexStatus.loaded && window.katexStatus.autoRenderLoaded && !window.katexStatus.initialized) {
-                if (typeof window.katex !== 'undefined' && typeof renderMathInElement !== 'undefined') {
-                    console.log('✅ 准备初始化KaTeX渲染系统');
-                    window.katexStatus.initialized = true;
-                    setTimeout(initKaTeXRendering, 100);
-                } else {
-                    console.warn('⚠️ 函数未定义，500ms后重试');
-                    setTimeout(tryInitKaTeX, 500);
-                }
+        /* ========== 备用CDN加载 ========== */
+        function loadKatexFallback() {
+            if (window.katexRetryCount < 1) {
+                window.katexRetryCount++;
+                console.log('🔄 尝试备用CDN（cdnjs）...');
+                var script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js';
+                script.onload = function() {
+                    window.katexLoaded = true;
+                    console.log('✅ KaTeX 从备用CDN加载成功');
+                    checkAndInit();
+                };
+                script.onerror = function() {
+                    console.error('❌ 备用CDN也失败');
+                };
+                document.head.appendChild(script);
             }
         }
         
-        // 初始化KaTeX渲染系统
-        function initKaTeXRendering() {
-            console.log('🚀 启动KaTeX渲染引擎');
-            
-            // 立即渲染一次
-            performRender();
-            
-            // 多次延迟渲染确保捕获动态内容
-            var delays = [300, 800, 1500, 3000];
-            delays.forEach(function(delay) {
-                setTimeout(performRender, delay);
-            });
-            
-            // 定期检查新内容
-            setInterval(performRender, 3000);
-            
-            // 启动DOM观察器
-            if (typeof MutationObserver !== 'undefined') {
-                var debounce;
-                var observer = new MutationObserver(function() {
-                    clearTimeout(debounce);
-                    debounce = setTimeout(performRender, 150);
-                });
-                
-                setTimeout(function() {
-                    if (document.body) {
-                        observer.observe(document.body, {
-                            childList: true,
-                            subtree: true,
-                            attributes: true,
-                            attributeFilter: ['data-katex-render']
-                        });
-                        console.log('👁️ DOM观察器已启动');
-                    }
-                }, 800);
+        function loadAutoRenderFallback() {
+            if (window.katexRetryCount < 1) {
+                window.katexRetryCount++;
+                console.log('🔄 尝试备用CDN（cdnjs）...');
+                var script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js';
+                script.onload = function() {
+                    window.autoRenderLoaded = true;
+                    console.log('✅ auto-render 从备用CDN加载成功');
+                    checkAndInit();
+                };
+                script.onerror = function() {
+                    console.error('❌ 备用CDN也失败');
+                };
+                document.head.appendChild(script);
             }
         }
         
-        // 执行LaTeX渲染
-        function performRender() {
-            if (typeof renderMathInElement === 'undefined') {
+        function checkAndInit() {
+            if (window.katexLoaded && window.autoRenderLoaded && typeof renderMathInElement !== 'undefined') {
+                console.log('✅ 所有库已加载，开始初始化');
+                initKaTeX();
+            } else {
+                console.log('⏳ 等待所有库加载... katex:', window.katexLoaded, 'autoRender:', window.autoRenderLoaded, 'renderMathInElement:', typeof renderMathInElement !== 'undefined');
+            }
+        }
+        </script>
+        <script>
+        /* ========== 关键函数：初始化KaTeX渲染 ========== */
+        function initKaTeX() {
+            console.log("🚀 初始化KaTeX渲染系统");
+            
+            // 检查是否已初始化
+            if (window.katexInitialized) {
+                console.log("⚠️ KaTeX已初始化，跳过");
                 return;
             }
             
+            // 确保库已加载
+            if (typeof window.katex === 'undefined' || typeof renderMathInElement === 'undefined') {
+                console.error("❌ KaTeX库未完全加载");
+                console.log("  katex:", typeof window.katex);
+                console.log("  renderMathInElement:", typeof renderMathInElement);
+                // 1秒后重试
+                setTimeout(function() {
+                    if (typeof renderMathInElement !== 'undefined') {
+                        initKaTeX();
+                    }
+                }, 1000);
+                return;
+            }
+            
+            console.log("✅ KaTeX库已完全加载，开始初始化渲染");
+            window.katexInitialized = true;
+            
+            // 立即渲染一次
+            renderAllMath();
+            
+            // 多次渲染确保捕获动态内容
+            setTimeout(renderAllMath, 200);
+            setTimeout(renderAllMath, 500);
+            setTimeout(renderAllMath, 1000);
+            setTimeout(renderAllMath, 2000);
+            
+            // 定期检查
+            setInterval(renderAllMath, 2000);
+            
+            // 启动DOM监听
+            startDOMObserver();
+        }
+        
+        /* ========== DOM变化监听 ========== */
+        function startDOMObserver() {
+            if (typeof MutationObserver === 'undefined') {
+                console.warn("⚠️ MutationObserver不可用");
+                return;
+            }
+            
+            if (window.katexObserverStarted) {
+                return; // 避免重复启动
+            }
+            
+            window.katexObserverStarted = true;
+            
+            var debounceTimer;
+            const observer = new MutationObserver(function(mutations) {
+                // 防抖：避免过于频繁触发
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(renderAllMath, 100);
+            });
+            
+            // 延迟启动observer确保body存在
+            setTimeout(function() {
+                if (document.body) {
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['data-katex-render']
+                    });
+                    console.log("👁️ DOM监听已启动");
+                }
+            }, 500);
+        }
+        
+        /* ========== 多种加载事件监听 ========== */
+        if (document.readyState === 'loading') {
+            document.addEventListener("DOMContentLoaded", function() {
+                console.log("� DOMContentLoaded triggered");
+                setTimeout(function() {
+                    if (window.autoRenderLoaded) {
+                        renderAllMath();
+                    }
+                }, 100);
+            });
+        } else {
+            console.log("📄 Document already loaded");
+        }
+        
+        window.addEventListener('load', function() {
+            console.log("🌐 Window loaded");
+            setTimeout(function() {
+                if (window.autoRenderLoaded) {
+                    renderAllMath();
+                }
+            }, 100);
+        });
+        
+        /* ========== 关键函数：渲染所有LaTeX公式 ========== */
+        /* ⚠️ 重要配置说明：
+         * 1. 查找所有data-katex-render="true"的元素
+         * 2. 使用KaTeX auto-render渲染其中的$...$和$$...$$
+         * 3. 渲染完成后标记为data-katex-render="done"避免重复
+         * 4. 不要修改delimiters配置（$和$$是标准LaTeX语法）
+         */
+        function renderAllMath() {
+            if (typeof renderMathInElement === 'undefined') {
+                return; // 静默失败，避免刷屏
+            }
+            
             try {
-                var targets = document.querySelectorAll('[data-katex-render="true"]');
+                // 查找所有标记为需要渲染的容器
+                const targets = document.querySelectorAll('[data-katex-render="true"]');
+                
                 if (targets.length === 0) {
-                    return;
+                    return; // 没有目标就不输出日志
                 }
                 
-                var rendered = 0;
-                console.log('🔍 发现 ' + targets.length + ' 个LaTeX容器');
+                let renderedCount = 0;
+                console.log("🔍 找到 " + targets.length + " 个待渲染容器");
                 
                 targets.forEach(function(elem) {
-                    if (!elem || !elem.textContent) return;
+                    if (!elem || !elem.textContent) {
+                        return; // 跳过空元素
+                    }
                     
-                    var hasFormula = elem.textContent.includes('$');
-                    var alreadyRendered = elem.querySelector('.katex') !== null;
+                    const hasLaTeX = elem.textContent.includes('$');
+                    const alreadyRendered = elem.querySelector('.katex') !== null;
                     
-                    if (hasFormula && !alreadyRendered) {
+                    console.log("  📋 容器状态: LaTeX=" + hasLaTeX + ", 已渲染=" + alreadyRendered);
+                    
+                    if (hasLaTeX && !alreadyRendered) {
+                        console.log("  ▶️ 开始渲染:", elem.textContent.substring(0, 50) + "...");
+                        
                         try {
                             renderMathInElement(elem, {
                                 delimiters: [
@@ -472,59 +546,51 @@ class RenderEngine:
                                 throwOnError: false,
                                 errorColor: '#cc0000',
                                 strict: false,
-                                trust: true,
-                                fleqn: false
+                                trust: true
                             });
                             
+                            // 检查渲染结果
+                            const katexCount = elem.querySelectorAll('.katex').length;
+                            console.log("  ✅ 渲染完成，生成 " + katexCount + " 个.katex元素");
+                            
+                            // 标记已渲染
                             elem.setAttribute('data-katex-render', 'done');
-                            rendered++;
-                        } catch (e) {
-                            console.error('❌ 渲染失败:', e.message);
+                            renderedCount++;
+                        } catch (renderError) {
+                            console.error("  ❌ 渲染失败:", renderError);
                         }
                     }
                 });
                 
-                if (rendered > 0) {
-                    window.katexStatus.renderCount += rendered;
-                    console.log('✨ 本次渲染 ' + rendered + ' 个容器 (总计: ' + window.katexStatus.renderCount + ')');
+                if (renderedCount > 0) {
+                    console.log("✨ 本次成功渲染 " + renderedCount + " 个容器");
                 }
-            } catch (err) {
-                console.error('❌ performRender错误:', err);
+            } catch (e) {
+                console.error('❌ renderAllMath错误:', e);
             }
         }
         
-        // 页面加载完成后初始化
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function() {
-                setTimeout(tryInitKaTeX, 200);
+        function checkRenderFailures() {
+            // 查找所有带有 data-fallback 的元素
+            document.querySelectorAll('[data-fallback]').forEach(function(el) {
+                // 检查是否包含 KaTeX 错误或未渲染
+                var hasError = el.querySelector('.katex-error');
+                var hasKatex = el.querySelector('.katex');
+                var text = el.textContent || el.innerText;
+                
+                // 如果有错误，或者没有成功渲染（仍然包含$符号），显示原文
+                if (hasError || (!hasKatex && (text.includes('$') || text.includes('\\\\')))) {
+                    var fallback = el.getAttribute('data-fallback');
+                    if (fallback) {
+                        // 解码HTML实体
+                        var decoded = fallback.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+                        el.innerHTML = '<code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-family: monospace;">' + decoded + '</code>';
+                        el.removeAttribute('data-fallback');
+                    }
+                }
             });
-        } else {
-            setTimeout(tryInitKaTeX, 200);
         }
-        </script>
         
-        <style>
-        /* KaTeX样式优化 */
-        .katex { font-size: 1.1em !important; }
-        .katex-display { margin: 1em 0 !important; }
-        .katex-error { color: #cc0000 !important; background: #fff3cd; padding: 2px 4px; border-radius: 3px; }
-        </style>
-        '''
-        
-        return header
-
-    def inject_wysiwyg_controls(self) -> str:
-        """
-        Inject WYSIWYG editor control scripts.
-        
-        This is a placeholder for future rich text editing features.
-        Currently returns empty script tags.
-        
-        Returns:
-            HTML script tags for WYSIWYG controls
-        """
-        js_code = """
-        <script>
         // 样本点击跳转处理函数
         window.handleSampleClick = function(sampleIndex) {
             console.log('Clicking sample:', sampleIndex);
@@ -559,6 +625,32 @@ class RenderEngine:
             }
         };
         </script>
-        """
+        <style>
+        /* LaTeX 公式样式 */
+        .latex-display {
+            display: block;
+            text-align: center;
+            margin: 15px 0;
+            font-size: 18px;
+        }
+        .latex-inline {
+            display: inline;
+            font-size: 18px;
+        }
+        .katex {
+            font-size: 1.1em !important;
+        }
+        .katex-display {
+            margin: 15px 0 !important;
+        }
+        /* 渲染失败时的样式 */
+        .katex-error {
+            color: inherit !important;
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        </style>
+        '''
         
-        return js_code
+        return header
